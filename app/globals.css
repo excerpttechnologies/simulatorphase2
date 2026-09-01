@@ -1,0 +1,394 @@
+@import 'tailwindcss';
+@import 'tw-animate-css';
+
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  /* HMI Industrial Theme */
+  --hmi-dark: #0D1117;
+  --hmi-panel: #161B22;
+  --hmi-border: #21262D;
+  --hmi-cyan: #00E5FF;
+  --hmi-amber: #FFB300;
+  --hmi-red: #FF3D3D;
+  --hmi-green: #00E676;
+  --hmi-text: #E6EDF3;
+  --hmi-muted: #8B949E;
+  
+  /* Default shadcn tokens mapped to HMI theme */
+  --background: #0D1117;
+  --foreground: #E6EDF3;
+  --card: #161B22;
+  --card-foreground: #E6EDF3;
+  --popover: #161B22;
+  --popover-foreground: #E6EDF3;
+  --primary: #00E5FF;
+  --primary-foreground: #0D1117;
+  --secondary: #21262D;
+  --secondary-foreground: #E6EDF3;
+  --muted: #21262D;
+  --muted-foreground: #8B949E;
+  --accent: #00E5FF;
+  --accent-foreground: #0D1117;
+  --destructive: #FF3D3D;
+  --destructive-foreground: #E6EDF3;
+  --border: #21262D;
+  --input: #21262D;
+  --ring: #00E5FF;
+  --radius: 0.375rem;
+}
+
+@theme inline {
+  --font-sans: var(--font-display), 'Rajdhani', system-ui, sans-serif;
+  --font-mono: var(--font-mono), 'JetBrains Mono', 'Courier New', monospace;
+  --font-display: var(--font-display), 'Rajdhani', system-ui, sans-serif;
+  
+  /* HMI Colors */
+  --color-hmi-dark: var(--hmi-dark);
+  --color-hmi-panel: var(--hmi-panel);
+  --color-hmi-border: var(--hmi-border);
+  --color-hmi-cyan: var(--hmi-cyan);
+  --color-hmi-amber: var(--hmi-amber);
+  --color-hmi-red: var(--hmi-red);
+  --color-hmi-green: var(--hmi-green);
+  --color-hmi-text: var(--hmi-text);
+  --color-hmi-muted: var(--hmi-muted);
+  
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --radius-sm: calc(var(--radius) - 2px);
+  --radius-md: var(--radius);
+  --radius-lg: calc(var(--radius) + 2px);
+}
+
+@layer base {
+  * {
+    @apply border-hmi-border outline-hmi-cyan/50;
+  }
+  body {
+    @apply bg-hmi-dark text-hmi-text;
+  }
+}
+
+/* LED Glow Effects */
+.led-green {
+  box-shadow: 0 0 8px #00E676, 0 0 16px #00E676;
+}
+
+.led-red {
+  box-shadow: 0 0 8px #FF3D3D, 0 0 16px #FF3D3D;
+}
+
+.led-amber {
+  box-shadow: 0 0 8px #FFB300, 0 0 16px #FFB300;
+}
+
+.led-cyan {
+  box-shadow: 0 0 8px #00E5FF, 0 0 16px #00E5FF;
+}
+
+/* Pulsing Animation */
+@keyframes pulse-led {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.pulse-led {
+  animation: pulse-led 1s ease-in-out infinite;
+}
+
+/* Fast pulse for alarms */
+@keyframes pulse-alarm {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+.pulse-alarm {
+  animation: pulse-alarm 0.5s ease-in-out infinite;
+}
+
+/* Wafer animation along track */
+@keyframes wafer-move {
+  0% { transform: translateX(0); }
+  100% { transform: translateX(100%); }
+}
+
+/* Success flash */
+@keyframes success-flash {
+  0% { background-color: transparent; }
+  50% { background-color: rgba(0, 230, 118, 0.3); }
+  100% { background-color: transparent; }
+}
+
+.success-flash {
+  animation: success-flash 0.5s ease-in-out;
+}
+
+/* Error flash */
+@keyframes error-flash {
+  0% { background-color: transparent; }
+  50% { background-color: rgba(255, 61, 61, 0.3); }
+  100% { background-color: transparent; }
+}
+
+.error-flash {
+  animation: error-flash 0.3s ease-in-out;
+}
+
+@keyframes profileMenuIn {
+  from {
+    opacity: 0;
+    transform: scale(0.94) translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+.profile-menu-dropdown {
+  animation: profileMenuIn 0.16s ease-out;
+  transform-origin: top right;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #161B22;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #21262D;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #30363D;
+}
+
+/* Gauge animations */
+@keyframes gauge-fill {
+  from { stroke-dashoffset: 100; }
+  to { stroke-dashoffset: var(--gauge-value); }
+}
+
+/* Zone heating animation */
+@keyframes zone-heat {
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 1; }
+}
+
+.zone-heating {
+  animation: zone-heat 0.5s ease-in-out infinite;
+}
+
+/* Bubble animation */
+@keyframes bubble-flow {
+  0% { transform: translateY(0); opacity: 0.8; }
+  100% { transform: translateY(-20px); opacity: 0; }
+}
+
+/* Card hover effect */
+.hmi-card {
+  transition: all 0.2s ease;
+}
+
+.hmi-card:hover {
+  border-color: var(--hmi-cyan);
+  box-shadow: 0 0 20px rgba(0, 229, 255, 0.1);
+}
+
+/* ── 3D Equipment Animations ── */
+
+/* Slow 3D scene rotation — shows all faces */
+@keyframes scene-rotate {
+  0%   { transform: rotateX(22deg) rotateY(-30deg); }
+  25%  { transform: rotateX(28deg) rotateY(-10deg); }
+  50%  { transform: rotateX(22deg) rotateY(10deg); }
+  75%  { transform: rotateX(16deg) rotateY(-10deg); }
+  100% { transform: rotateX(22deg) rotateY(-30deg); }
+}
+.scene-rotate-anim {
+  animation: scene-rotate 8s ease-in-out infinite;
+}
+@keyframes robot-arm-swing {
+  0%   { transform: rotate(-25deg); }
+  50%  { transform: rotate(25deg); }
+  100% { transform: rotate(-25deg); }
+}
+.robot-arm-anim {
+  animation: robot-arm-swing 1.4s ease-in-out infinite;
+  transform-origin: 50% 100%;
+}
+
+/* Robot arm 2 counter-swing */
+@keyframes robot-arm2-swing {
+  0%   { transform: rotate(20deg); }
+  50%  { transform: rotate(-20deg); }
+  100% { transform: rotate(20deg); }
+}
+.robot-arm2-anim {
+  animation: robot-arm2-swing 1.4s ease-in-out infinite;
+  transform-origin: 50% 0%;
+}
+
+/* Wafer spin */
+@keyframes wafer-spin {
+  from { transform: rotateZ(0deg); }
+  to   { transform: rotateZ(360deg); }
+}
+.wafer-spin-anim {
+  animation: wafer-spin 0.6s linear infinite;
+  transform-origin: center;
+}
+
+/* Heat shimmer */
+@keyframes heat-shimmer {
+  0%,100% { opacity: 0.3; transform: scaleY(1) translateY(0); }
+  50%      { opacity: 0.9; transform: scaleY(1.3) translateY(-4px); }
+}
+.heat-wave-anim {
+  animation: heat-shimmer 0.8s ease-in-out infinite;
+  transform-origin: bottom center;
+}
+.heat-wave-anim:nth-child(2) { animation-delay: 0.25s; }
+.heat-wave-anim:nth-child(3) { animation-delay: 0.5s; }
+
+/* Chill pulse */
+@keyframes chill-pulse {
+  0%,100% { opacity: 0.4; }
+  50%      { opacity: 1; }
+}
+.chill-anim {
+  animation: chill-pulse 1.2s ease-in-out infinite;
+}
+.chill-anim:nth-child(2) { animation-delay: 0.3s; }
+.chill-anim:nth-child(3) { animation-delay: 0.6s; }
+.chill-anim:nth-child(4) { animation-delay: 0.9s; }
+
+/* Liquid drip */
+@keyframes drip {
+  0%   { transform: translateY(0); opacity: 1; }
+  80%  { transform: translateY(10px); opacity: 0.8; }
+  100% { transform: translateY(14px); opacity: 0; }
+}
+.drip-anim { animation: drip 1s ease-in infinite; }
+.drip-anim:nth-child(2) { animation-delay: 0.33s; }
+.drip-anim:nth-child(3) { animation-delay: 0.66s; }
+
+/* Vapor bubble float */
+@keyframes bubble-rise {
+  0%   { transform: translateY(0) scale(1); opacity: 0.8; }
+  100% { transform: translateY(-18px) scale(1.4); opacity: 0; }
+}
+.bubble-anim { animation: bubble-rise 1.2s ease-out infinite; }
+.bubble-anim:nth-child(2) { animation-delay: 0.24s; }
+.bubble-anim:nth-child(3) { animation-delay: 0.48s; }
+.bubble-anim:nth-child(4) { animation-delay: 0.72s; }
+.bubble-anim:nth-child(5) { animation-delay: 0.96s; }
+
+/* Dispense arm sweep */
+@keyframes arm-sweep {
+  0%,100% { transform: rotate(-20deg); }
+  50%      { transform: rotate(20deg); }
+}
+.arm-sweep-anim {
+  animation: arm-sweep 2s ease-in-out infinite;
+  transform-origin: 100% 0%;
+}
+
+/* Scanner beam pulse */
+@keyframes beam-pulse {
+  0%,100% { opacity: 0.2; }
+  50%      { opacity: 1; }
+}
+.beam-anim { animation: beam-pulse 0.5s ease-in-out infinite; }
+
+/* 3D box tilt idle */
+@keyframes box-idle {
+  0%,100% { transform: perspective(200px) rotateX(8deg) rotateY(-6deg); }
+  50%      { transform: perspective(200px) rotateX(10deg) rotateY(6deg); }
+}
+.box-3d-idle {
+  animation: box-idle 4s ease-in-out infinite;
+  transform-style: preserve-3d;
+}
+
+/* Temp counter */
+@keyframes temp-tick {
+  0%   { content: "148°C"; }
+  33%  { content: "150°C"; }
+  66%  { content: "151°C"; }
+  100% { content: "150°C"; }
+}
+
+/* Data readout styling */
+.data-readout {
+  font-family: var(--font-mono);
+  letter-spacing: 0.05em;
+}
+
+/* Panel styling */
+.hmi-panel {
+  background: linear-gradient(180deg, #1a2028 0%, #161B22 100%);
+  border: 1px solid #21262D;
+}
+
+/* Custom checkbox for FMEA */
+.hmi-checkbox {
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  border: 2px solid #21262D;
+  border-radius: 3px;
+  background: #0D1117;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.hmi-checkbox:checked {
+  background: #00E676;
+  border-color: #00E676;
+}
+
+.hmi-checkbox:checked::after {
+  content: '✓';
+  display: block;
+  color: #0D1117;
+  font-size: 12px;
+  text-align: center;
+  line-height: 14px;
+}
+
+/* Component Info panel slide-in from right */
+@keyframes slideInFromRight {
+  from {
+    transform: translateX(40px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}

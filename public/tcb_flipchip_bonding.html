@@ -1,0 +1,1060 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>300mm Flip Chip Thermo-Compression Bonding — Process Animation</title>
+<style>
+  :root{
+    --bg:#0D1117;
+    --panel:#131A22;
+    --panel-border:#233041;
+    --text:#D8E1EA;
+    --dim:#7C8A9A;
+    --accent-cyan:#37E7E0;
+    --accent-magenta:#FF4FD8;
+    --accent-green:#3ECF6A;
+    --accent-amber:#E8A33D;
+    --accent-red:#FF4B4B;
+    --accent-blue:#4FA8FF;
+    --mono: 'Consolas','SF Mono','Menlo',monospace;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,sans-serif;}
+  #app{max-width:1180px;margin:0 auto;padding:14px 14px 26px;}
+  h1{font-size:15px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--dim);margin:2px 0 12px;display:flex;align-items:center;gap:10px;}
+  h1 span.dot{width:8px;height:8px;border-radius:50%;background:var(--accent-green);box-shadow:0 0 8px var(--accent-green);display:inline-block;}
+
+  /* Telemetry bar */
+  #telemetry{
+    display:grid;
+    grid-template-columns: 1.6fr repeat(5,1fr);
+    gap:1px;
+    background:var(--panel-border);
+    border:1px solid var(--panel-border);
+    border-radius:8px;
+    overflow:hidden;
+    margin-bottom:12px;
+  }
+  .tcell{background:var(--panel);padding:8px 12px;}
+  .tlabel{font-size:9px;letter-spacing:.08em;text-transform:uppercase;color:var(--dim);margin-bottom:3px;}
+  .tvalue{font-family:var(--mono);font-size:15px;font-weight:600;color:var(--text);}
+  .tvalue.step-name{font-size:17px;line-height:1.3;}
+  .tvalue .sub{font-size:10px;color:var(--accent-cyan);display:block;font-weight:500;margin-top:1px;}
+  #phaseTag{display:inline-block;background:#1B2733;border:1px solid var(--panel-border);color:var(--accent-cyan);font-size:9px;letter-spacing:.06em;padding:1px 6px;border-radius:4px;margin-bottom:4px;}
+
+  /* Views */
+  .viewpanel{background:var(--panel);border:1px solid var(--panel-border);border-radius:8px;margin-bottom:10px;overflow:hidden;}
+  .viewhead{display:flex;justify-content:space-between;align-items:center;padding:7px 12px;border-bottom:1px solid var(--panel-border);}
+  .viewhead .vtitle{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--dim);}
+  .viewhead .vnote{font-family:var(--mono);font-size:10px;color:var(--accent-cyan);}
+  canvas{display:block;width:100%;height:auto;background:
+      radial-gradient(ellipse at 50% 0%, #121922 0%, #0D1117 70%);}
+
+  /* Controls */
+  #controls{display:flex;align-items:center;gap:8px;flex-wrap:wrap;background:var(--panel);border:1px solid var(--panel-border);border-radius:8px;padding:10px 12px;}
+  button{
+    background:#1B2733;border:1px solid var(--panel-border);color:var(--text);
+    font-size:12px;padding:7px 13px;border-radius:6px;cursor:pointer;font-family:inherit;
+    transition:background .15s, border-color .15s;
+  }
+  button:hover{background:#243244;border-color:#37506B;}
+  button:active{background:#2c3e52;}
+  button.primary{background:#1F5B4E;border-color:#2A8064;color:#BDF5DF;}
+  button.primary:hover{background:#256B5B;}
+  #phaseSelect{
+    background:#1B2733;border:1px solid var(--panel-border);color:var(--text);
+    font-size:12px;padding:7px 10px;border-radius:6px;font-family:inherit;margin-left:auto;
+  }
+  #scrubwrap{flex:1 1 100%;display:flex;align-items:center;gap:10px;margin-top:6px;}
+  #scrub{flex:1;accent-color:var(--accent-cyan);}
+  #scrubLabel{font-family:var(--mono);font-size:11px;color:var(--dim);white-space:nowrap;}
+
+  #qcbadge{
+    position:absolute; top:44px; right:14px;
+    background:#12261C;border:1px solid var(--accent-green);color:#BDF5DF;
+    padding:8px 14px;border-radius:8px;font-family:var(--mono);font-size:12px;
+    opacity:0; transform:translateY(-6px); transition:opacity .3s, transform .3s;
+    pointer-events:none;
+  }
+  #qcbadge.show{opacity:1;transform:translateY(0);}
+  #qcbadge .qt{font-weight:700;color:var(--accent-green);font-size:13px;}
+
+  .legend{display:flex;gap:14px;flex-wrap:wrap;padding:8px 12px;font-size:10px;color:var(--dim);border-top:1px solid var(--panel-border);}
+  .legend span{display:inline-flex;align-items:center;gap:5px;}
+  .sw{width:9px;height:9px;border-radius:2px;display:inline-block;}
+</style>
+</head>
+<body>
+<div id="app">
+  <h1><span class="dot"></span>300mm Wafer Flip-Chip Thermo-Compression Bonding — TCB Process Walkthrough</h1>
+
+  <div id="telemetry">
+    <div class="tcell" style="position:relative;">
+      <div id="phaseTag">PHASE 1</div>
+      <div class="tvalue step-name" id="tStepName">Substrate Loading</div>
+      <span class="sub" id="tSubPhase">Stage vacuum engage</span>
+    </div>
+    <div class="tcell"><div class="tlabel">Temperature</div><div class="tvalue" id="tTemp">80.0°C</div></div>
+    <div class="tcell"><div class="tlabel">Bond Force</div><div class="tvalue" id="tForce">0.0 N</div></div>
+    <div class="tcell"><div class="tlabel">Z-Position</div><div class="tvalue" id="tZ">— µm</div></div>
+    <div class="tcell"><div class="tlabel">Vacuum</div><div class="tvalue" id="tVac">ON</div></div>
+    <div class="tcell"><div class="tlabel">Timer</div><div class="tvalue" id="tTimer">0.00 s</div></div>
+  </div>
+
+  <div class="viewpanel" style="position:relative;">
+    <div class="viewhead"><div class="vtitle">Side View — Cross Section</div><div class="vnote" id="sideNote">—</div></div>
+    <canvas id="side" width="1160" height="480"></canvas>
+    <div id="qcbadge"><span class="qt">PASS</span> — QC Inspection Gate<br>BLT 15µm · 0% Bridging · Voiding &lt;5%</div>
+    <div class="legend">
+      <span><i class="sw" style="background:#E8A33D"></i>Pre-heat / standby (~150°C)</span>
+      <span><i class="sw" style="background:#FF4B4B"></i>Peak reflow temp (260°C, crosses 217°C solder melt)</span>
+      <span><i class="sw" style="background:#8FD9FF"></i>Active cooling / N₂ purge</span>
+      <span><i class="sw" style="background:var(--accent-cyan)"></i>Look-up beam</span>
+      <span><i class="sw" style="background:var(--accent-magenta)"></i>Look-down beam</span>
+    </div>
+  </div>
+
+  <div class="viewpanel">
+    <div class="viewhead"><div class="vtitle">Top View — Plan Layout (X / Y)</div><div class="vnote" id="topNote">—</div></div>
+    <canvas id="top" width="1160" height="290"></canvas>
+  </div>
+
+  <div id="controls">
+    <button id="btnReset">⟲ Reset</button>
+    <button id="btnBack">⏮ Step Back</button>
+    <button id="btnPlay" class="primary">▶ Play</button>
+    <button id="btnFwd">Step Forward ⏭</button>
+    <button id="btnAudio">🔊 Narration: On</button>
+    <select id="phaseSelect"></select>
+    <div id="scrubwrap">
+      <span id="scrubLabel">Step 1 / 17</span>
+      <input type="range" id="scrub" min="0" max="1000" value="0">
+    </div>
+  </div>
+</div>
+
+<script>
+(function(){
+"use strict";
+
+const sideCv = document.getElementById('side');
+const topCv  = document.getElementById('top');
+const sctx = sideCv.getContext('2d');
+const tctx = topCv.getContext('2d');
+const SW = sideCv.width, SH = sideCv.height;
+const TW = topCv.width,  TH = topCv.height;
+
+const STX = {
+  wafer: 150,
+  pedestal: 400,
+  bondHome: 520,
+  flux: 610,
+  align: 860,
+};
+const HEAD_WAYPTS = [STX.bondHome, STX.pedestal, STX.flux, STX.align];
+function headWaypointX(v){
+  v = Math.max(0, Math.min(HEAD_WAYPTS.length-1, v));
+  const i = Math.min(Math.floor(v), HEAD_WAYPTS.length-2);
+  return lerp(HEAD_WAYPTS[i], HEAD_WAYPTS[i+1], v-i);
+}
+const STAGE_Y_SIDE = 400;
+const STAGE_Y_TOP  = 190;
+
+const PEDESTAL_RING = { innerRx: 13, innerRy: 6, band: 9 };
+
+function lerp(a,b,t){ return a+(b-a)*t; }
+function clamp(t){ return Math.max(0,Math.min(1,t)); }
+function easeInOut(t){ return t<0.5 ? 2*t*t : 1-Math.pow(-2*t+2,2)/2; }
+function easeOut(t){ return 1-Math.pow(1-t,3); }
+function mixColor(c1,c2,t){
+  const a=parseInt(c1.slice(1),16), b=parseInt(c2.slice(1),16);
+  const ar=(a>>16)&255, ag=(a>>8)&255, ab=a&255;
+  const br=(b>>16)&255, bg=(b>>8)&255, bb=b&255;
+  const r=Math.round(lerp(ar,br,t)), g=Math.round(lerp(ag,bg,t)), bl=Math.round(lerp(ab,bb,t));
+  return `rgb(${r},${g},${bl})`;
+}
+function roundRect(ctx,x,y,w,h,r){
+  ctx.beginPath();
+  ctx.moveTo(x+r,y);
+  ctx.arcTo(x+w,y,x+w,y+h,r);
+  ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r);
+  ctx.arcTo(x,y,x+w,y,r);
+  ctx.closePath();
+}
+
+let S = {
+  stageTemp: 25,
+  stageVacuumOn: false,
+  substrateIn: false,
+  scanX: 0, scanning:false,
+  ejectorZ: 0,
+  pickX: 0, pickZ: 0, pickVacuumOn:false, pickForce:0,
+  dieOwner: 'wafer',
+  dieX: STX.wafer, dieY: 0,
+  pedestalAngle: 0,
+  pedestalVacuumOn: false,
+  bondheadX: 0, bondheadZ: 0, bondheadZGap: 1,
+  bondheadTemp: 25, bondheadForce: 0,
+  fluxDip: 0,
+  opticsX: 0, opticsActive:false, opticsIn:false,
+  alignShow:false,
+  gasJets:0,
+  releasePulse:0,
+  qc:false,
+  armFade: 1,
+  timerMs:0,
+};
+
+const STEPS = [
+{
+  phase:'PHASE 1 · WAFER PREP', title:'Substrate Loading', sub:'Stage vacuum engage · heat to baseline',
+  dur:2200, force:[0,0], temp:[25,80], z:'—',
+  end:{ stageTemp:80 },
+  discrete:{ substrateIn:{at:0.05,value:true}, stageVacuumOn:{at:0.4,value:true} },
+  sideNote:'Substrate glides onto heated stage · −85 kPa chuck vacuum',
+  topNote:'Substrate stage (plan) — target grid visible, top-left device wafer staged'
+},
+{
+  phase:'PHASE 1 · WAFER PREP', title:'Wafer Fiducial Scan', sub:'PRS laser line scan — good-die map',
+  dur:2000, force:[0,0], temp:[80,80], z:'—',
+  end:{ scanX:1 },
+  discrete:{ scanning:{at:0.0,value:true} },
+  sideNote:'PRS camera scans wafer surface for fiducials',
+  topNote:'Line-scan sweeps across 300mm wafer building the good-die map'
+},
+{
+  phase:'PHASE 2 · PICK & FLIP', title:'Die Ejection', sub:'Ejector pins rise · 0.8mm stroke @ 15mm/s',
+  dur:900, force:[0,0], temp:[80,80], z:'0 → 0.8 mm',
+  end:{ ejectorZ:1 },
+  discrete:{ scanning:{at:0,value:false} },
+  sideNote:'4-pin ejector array breaks tape adhesion beneath target die',
+  topNote:'Ejector fires under selected die coordinate (row 3, col 5)'
+},
+{
+  phase:'PHASE 2 · PICK & FLIP', title:'Pick & Lift', sub:'Vacuum −85 kPa · 3.5 N pick force',
+  dur:1400, force:[0,3.5], temp:[80,80], z:'lift +2.0 mm',
+  end:{ pickZ:1, dieY:0.0 },
+  discrete:{ pickVacuumOn:{at:0.15,value:true}, dieOwner:{at:0.5,value:'pick'}, ejectorZ:{at:0.05,value:0} },
+  mech:'pick_contact',
+  sideNote:'Collet lowers to contact the die, engages vacuum, lifts clear of tape frame',
+  topNote:'Pick head descends over wafer station and lifts the target die'
+},
+{
+  phase:'PHASE 2 · PICK & FLIP', title:'Transfer & Handover to Pedestal', sub:'Pick arm carries die to the Ring Vacuum Pedestal',
+  dur:2200, force:[3.5,3.5], temp:[80,80], z:'—',
+  end:{ pickX:1 },
+  discrete:{ pedestalVacuumOn:{at:0.78,value:true}, pickVacuumOn:{at:0.83,value:false}, dieOwner:{at:0.80,value:'pedestal'} },
+  mech:'pedestal_handoff',
+  sideNote:'Arm travels sideways until centered exactly over the pedestal axis, then lowers straight down and places the die at center — bumps facing up',
+  topNote:'Die transits along X from wafer station to the vacuum pedestal, then descends onto it'
+},
+{
+  phase:'PHASE 2 · PICK & FLIP', title:'180° Flip', sub:'Ring Vacuum Pedestal rotates @ 720°/s — bumps face down',
+  dur:900, force:[0,0], temp:[80,80], z:'—',
+  end:{ pedestalAngle:180, armFade:0 },
+  sideNote:'Ring vacuum pedestal inverts — Cu pillars / Sn-Ag caps now downward',
+  topNote:'Rotation indicator sweeps 180° at the pedestal station'
+},
+{
+  phase:'PHASE 2 · PICK & FLIP', title:'Bonding Head Moves to Pedestal', sub:'Head travels left from its home position, aligning to the pedestal axis',
+  dur:900, force:[0,0], temp:[80,80], z:'—',
+  end:{ bondheadX:1 },
+  sideNote:'TCB bonding head moves left from home so it is directly aligned over the flipped pedestal',
+  topNote:'Bonding head translates left toward the pedestal station'
+},
+{
+  phase:'PHASE 2 · PICK & FLIP', title:'Bonding Head Picks Up Die', sub:'Head descends onto the flipped pedestal · vacuum-picks die at ~150°C',
+  dur:1000, force:[0,0], temp:[80,150], z:'gap → 50 µm',
+  end:{ bondheadZGap:0, bondheadTemp:150 },
+  discrete:{ pedestalVacuumOn:{at:0.55,value:false}, dieOwner:{at:0.5,value:'bondhead'} },
+  mech:'bondhead_pickup',
+  sideNote:'TCB bonding head lowers onto the flipped die, vacuum-picks it, lifts clear',
+  topNote:'Bonding head aligns over the pedestal for pickup'
+},
+{
+  phase:'PHASE 3 · DIP FLUX', title:'Move to Flux Plate', sub:'Bonding head lifts and translates right to the rotating flux film',
+  dur:1100, force:[0,0], temp:[150,150], z:'—',
+  end:{ bondheadX:2 },
+  sideNote:'Head lifts clear of the pedestal and travels right toward the flux plate station',
+  topNote:'Bonding head slides right, die now over flux plate'
+},
+{
+  phase:'PHASE 3 · DIP FLUX', title:'Dip, Dwell & Retract', sub:'5 µm dip into 7 µm flux film · 200 ms dwell',
+  dur:1300, force:[0,0], temp:[150,150], z:'5 µm dip',
+  end:{ fluxDip:1 },
+  mech:'flux_contact',
+  sideNote:'Bumps dip into liquid flux film — thin wetting layer forms',
+  topNote:'Rotating flux plate: dip footprint visible at die center'
+},
+{
+  phase:'PHASE 4 · OPTICS ALIGN', title:'Move to Bond Site', sub:'Head travels above target substrate pad site',
+  dur:1200, force:[0,0], temp:[150,150], z:'—',
+  end:{ bondheadX:3, fluxDip:0 },
+  sideNote:'Head positions directly above the target bonding site',
+  topNote:'Head travels to substrate alignment station (bond site #14)'
+},
+{
+  phase:'PHASE 4 · OPTICS ALIGN', title:'Dual-FOV Optics Alignment', sub:'Look-up / look-down beams — sub-micron registration',
+  dur:2200, force:[0,0], temp:[150,150], z:'clearance >10 mm',
+  end:{ opticsX:1 },
+  discrete:{ opticsIn:{at:0.02,value:true}, opticsActive:{at:0.15,value:true}, alignShow:{at:0.55,value:true} },
+  sideNote:'Split-field optics arm slides into the gap — dual beams fire',
+  topNote:'ΔX / ΔY / Δθ overlay resolves — die registers to substrate pads'
+},
+{
+  phase:'PHASE 5 · TCB CYCLE', title:'Touchdown / Pre-Heat', sub:'Optics arm clears the gap as the head descends → 2.0 N sense, force ramps to 45.0 N · holds ~150°C',
+  dur:1900, force:[0,45.0], temp:[150,150], z:'touchdown → held',
+  end:{ bondheadZ:1, bondheadForce:45.0 },
+  discrete:{ alignShow:{at:0.0,value:false}, opticsActive:{at:0.02,value:false}, opticsIn:{at:0.32,value:false} },
+  mech:'bond_touchdown',
+  sideNote:'Dual-FOV optics arm withdraws from the die/substrate gap as the head — already at ~150°C from pickup — descends; touchdown-force sense, then the programmed force ramp compresses the Cu pillar / Sn-Ag interfaces to full bond load',
+  topNote:'Optics clear the bonding axis as the head descends; bond site #14 touchdown registered, force ramping to full bond load'
+},
+{
+  phase:'PHASE 5 · TCB CYCLE', title:'Peak Reflow Pulse', sub:'Rapid ramp 100–200°C/s · crosses 217°C solder melt point · 45 N held',
+  dur:900, force:[45.0,45.0], temp:[150,260], z:'held',
+  end:{ bondheadTemp:260 },
+  mech:'bond_held',
+  sideNote:'Temperature rockets up at 100–200°C/s, crossing the 217°C solder melting point — the bump tip briefly liquefies and forms the intermetallic compound (IMC) bond',
+  topNote:'Peak reflow pulse: bump tip liquefies, IMC joint forming at target site'
+},
+{
+  phase:'PHASE 5 · TCB CYCLE', title:'Cool Down', sub:'Heater off · cooling air blast · rapidly drops below 217°C solidification point · 45 N held',
+  dur:1200, force:[45.0,45.0], temp:[260,190], z:'held',
+  end:{ bondheadTemp:190, gasJets:1 },
+  mech:'bond_held',
+  sideNote:'Heater cuts out and a blast of cooling air through the bond head rapidly quenches the joint back below the solidification point, locking the IMC bond solid',
+  topNote:'Cooling air quenches the joint at the bond site'
+},
+{
+  phase:'PHASE 6 · RELEASE', title:'Release & Retract', sub:'+10 kPa purge pulse · retract @ 50 mm/s',
+  dur:1300, force:[45.0,0], temp:[190,120], z:'retract',
+  end:{ bondheadZ:0, bondheadForce:0, bondheadTemp:120, gasJets:0, releasePulse:1, bondheadZGap:1 },
+  discrete:{ dieOwner:{at:0.0,value:'substrate'} },
+  mech:'bond_retract',
+  sideNote:'Positive vacuum pulse releases the die instantly — bond interface stays put on the substrate as the head lifts clear, untouched',
+  topNote:'Bonded die released — head clears the substrate'
+},
+{
+  phase:'PHASE 6 · RELEASE', title:'Index to Next Site', sub:'Stage advances · head returns home · QC Inspection Gate',
+  dur:1600, force:[0,0], temp:[120,120], z:'—',
+  end:{ releasePulse:0, bondheadX:0 },
+  discrete:{ qc:{at:0.35,value:true} },
+  sideNote:'Stage indexes forward; bonding head returns to its home position for the next die',
+  topNote:'PASS — QC gate clears bond site #14; next target queued'
+},
+];
+
+const STEP_COMMENTARY = [
+  'Loading the substrate onto the heated stage and engaging vacuum hold.',
+  'Scanning the wafer fiducial marks to register die coordinates.',
+  'Ejector pins push up from beneath to release the target die.',
+  'The pick and place arm vacuum grips the die and lifts it clear.',
+  'Carrying the die sideways and lowering it onto the vacuum pedestal.',
+  'The vacuum pedestal rotates a full one eighty degrees, flipping the die.',
+  'The T C B bonding head travels left to align over the flipped die.',
+  'The bonding head lowers, vacuum picks the die, and lifts it away.',
+  'Moving the die over to the flux film plate.',
+  'Dipping the bumps into flux, holding briefly, then retracting clear.',
+  'Moving the die into position above the target bond site.',
+  'Dual field of view optics slide in to align die and substrate.',
+  'Touching down on the substrate and ramping up to full bond force.',
+  'A rapid heat pulse melts the solder, forming the bond.',
+  'Cooling air locks the joint solid before the head lifts away.',
+  'Releasing the die and retracting the bonding head clear.',
+  'Indexing to the next site as the head returns home.'
+];
+
+STEPS.forEach(s=>{ s.dur = Math.round(s.dur*1.3); });
+STEPS.forEach(s=>{ s.dur = Math.round(s.dur*1.4); });
+STEPS.forEach(s=>{ s.dur = Math.round(s.dur*2); });
+
+const EFFECTIVE_DUR = STEPS.map((s,i)=>{
+  const words = (STEP_COMMENTARY[i] || s.title).trim().split(/\s+/).length;
+  const estNarrationMs = words*550 + 800;
+  return Math.max(s.dur, estNarrationMs);
+});
+
+const NUMFIELDS = ['stageTemp','scanX','ejectorZ','pickX','pickZ','pickForce','dieY',
+  'pedestalAngle','bondheadX','bondheadZ','bondheadZGap','bondheadTemp','bondheadForce',
+  'fluxDip','opticsX','gasJets','releasePulse','armFade'];
+
+let stepStartSnap = {};
+function snapshot(){ NUMFIELDS.forEach(k=> stepStartSnap[k]=S[k]); }
+snapshot();
+
+let curStep = 0;
+let curProgress = 0;
+let elapsed = 0;
+let playing = false;
+let lastTs = null;
+
+let audioOn = true;
+let lastAnnouncedStep = -1;
+let voicesReady = false;
+let narrationDone = true;
+let currentUtterance = null;
+let narrationStartedAt = 0;
+if('speechSynthesis' in window){
+  window.speechSynthesis.getVoices();
+  window.speechSynthesis.onvoiceschanged = ()=>{ voicesReady = true; };
+}
+function announceStep(idx){
+  if(!audioOn || !('speechSynthesis' in window)){ narrationDone = true; return; }
+  if(idx === lastAnnouncedStep) return;
+  lastAnnouncedStep = idx;
+  const text = STEP_COMMENTARY[idx] || STEPS[idx].title;
+  narrationDone = false;
+  const u = new SpeechSynthesisUtterance(text);
+  u.rate = 1.02;
+  u.pitch = 1.0;
+  u.volume = 1.0;
+  const markDone = ()=>{ narrationDone = true; };
+  u.onend = markDone;
+  u.onerror = markDone;
+  currentUtterance = u;
+  narrationStartedAt = performance.now();
+  setTimeout(markDone, 25000);
+  window.speechSynthesis.speak(u);
+}
+function pollNarration(){
+  if(narrationDone) return;
+  if(!audioOn || !('speechSynthesis' in window)){ narrationDone = true; return; }
+  const grace = 150;
+  if(performance.now() - narrationStartedAt < grace) return;
+  if(!window.speechSynthesis.speaking && !window.speechSynthesis.pending){
+    narrationDone = true;
+  }
+}
+function setAudioOn(on){
+  audioOn = on;
+  const btn = document.getElementById('btnAudio');
+  if(btn) btn.textContent = audioOn ? '🔊 Narration: On' : '🔇 Narration: Off';
+  if(!audioOn && 'speechSynthesis' in window) window.speechSynthesis.cancel();
+  if(!audioOn) narrationDone = true;
+}
+
+function totalDurAll(){ return STEPS.reduce((a,s)=>a+s.dur,0); }
+
+function applyStep(stepIdx, progress){
+  const st = STEPS[stepIdx];
+  const p = clamp(progress);
+  curProgress = p;
+  const ep = easeInOut(p);
+  NUMFIELDS.forEach(k=>{
+    const from = stepStartSnap[k] !== undefined ? stepStartSnap[k] : S[k];
+    const to = (st.end && st.end[k] !== undefined) ? st.end[k] : from;
+    S[k] = lerp(from, to, ep);
+  });
+  if(st.mech === 'pedestal_handoff'){
+    const hp = clamp(p/0.45);
+    S.pickX = easeInOut(hp);
+  }
+  if(st.mech === 'bond_touchdown'){
+    const rp = clamp(p/0.3);
+    const from = stepStartSnap.opticsX !== undefined ? stepStartSnap.opticsX : S.opticsX;
+    S.opticsX = lerp(from, 0, easeInOut(rp));
+  }
+  if(st.discrete){
+    Object.keys(st.discrete).forEach(k=>{
+      const d = st.discrete[k];
+      S[k] = (p >= d.at) ? d.value : (k in S ? S[k] : false);
+    });
+  }
+  updateDerived(st, p);
+}
+
+function updateDerived(st, p){
+  if(st.discrete && st.discrete.stageVacuumOn){
+    if(p>=st.discrete.stageVacuumOn.at) S.stageVacuumOn = st.discrete.stageVacuumOn.value;
+  } else if(curStep>0 && S.stageVacuumOn===undefined){
+    S.stageVacuumOn = true;
+  }
+  if(curStep>0) S.substrateIn = true;
+
+  switch(S.dieOwner){
+    case 'wafer':    S.dieX = STX.wafer; break;
+    case 'pick':     S.dieX = lerp(STX.wafer, STX.pedestal, S.pickX); break;
+    case 'pedestal': S.dieX = STX.pedestal; break;
+    case 'bondhead': S.dieX = headWaypointX(S.bondheadX); break;
+    case 'substrate':S.dieX = STX.align; break;
+    default: break;
+  }
+}
+
+function setStep(idx, progress){
+  idx = Math.max(0, Math.min(STEPS.length-1, idx));
+  if(idx !== curStep){
+    curStep = idx;
+  }
+  snapshot();
+  applyStep(curStep, progress);
+}
+
+function tick(ts){
+  if(!playing){ lastTs = null; return; }
+  if(lastTs===null) lastTs = ts;
+  const dt = ts - lastTs;
+  lastTs = ts;
+  elapsed += dt;
+  pollNarration();
+  const effDur = EFFECTIVE_DUR[curStep];
+  if(elapsed >= effDur){
+    if(narrationDone){
+      elapsed = 0;
+      if(curStep < STEPS.length-1){
+        curStep++;
+        snapshot();
+        announceStep(curStep);
+      } else {
+        playing = false;
+        updatePlayBtn();
+        elapsed = effDur;
+      }
+    } else {
+      elapsed = effDur;
+    }
+  }
+  applyStep(curStep, elapsed/effDur);
+  render();
+  requestAnimationFrame(tick);
+}
+
+function updatePlayBtn(){
+  document.getElementById('btnPlay').textContent = playing ? '⏸ Pause' : '▶ Play';
+}
+
+const phaseSelect = document.getElementById('phaseSelect');
+STEPS.forEach((s,i)=>{
+  const opt = document.createElement('option');
+  opt.value=i; opt.textContent = `${i+1}. ${s.title}`;
+  phaseSelect.appendChild(opt);
+});
+phaseSelect.addEventListener('change', ()=>{
+  curStep = parseInt(phaseSelect.value,10);
+  elapsed = 0;
+  snapshot();
+  applyStep(curStep,0);
+  render();
+  announceStep(curStep);
+});
+
+document.getElementById('btnPlay').addEventListener('click', ()=>{
+  playing = !playing;
+  updatePlayBtn();
+  if(playing){ lastTs=null; requestAnimationFrame(tick); announceStep(curStep); }
+});
+document.getElementById('btnAudio').addEventListener('click', ()=>{
+  setAudioOn(!audioOn);
+});
+document.getElementById('btnReset').addEventListener('click', ()=>{
+  playing=false; updatePlayBtn();
+  curStep=0; elapsed=0;
+  S = Object.assign(S,{ stageTemp:25, stageVacuumOn:false, substrateIn:false, scanX:0, scanning:false,
+    ejectorZ:0, pickX:0, pickZ:0, pickVacuumOn:false, pickForce:0, dieOwner:'wafer', dieY:0, pedestalAngle:0, pedestalVacuumOn:false,
+    bondheadX:0, bondheadZ:0, bondheadZGap:1, bondheadTemp:25, bondheadForce:0, fluxDip:0, opticsX:0,
+    opticsActive:false, opticsIn:false, alignShow:false, gasJets:0, releasePulse:0, qc:false, armFade:1, timerMs:0 });
+  snapshot();
+  applyStep(0,0);
+  render();
+  lastAnnouncedStep = -1;
+  announceStep(0);
+});
+document.getElementById('btnFwd').addEventListener('click', ()=>{
+  playing=false; updatePlayBtn();
+  if(curStep < STEPS.length-1){ curStep++; elapsed=0; snapshot(); applyStep(curStep,0); render(); announceStep(curStep); }
+});
+document.getElementById('btnBack').addEventListener('click', ()=>{
+  playing=false; updatePlayBtn();
+  if(curStep>0){ curStep--; elapsed=0; snapshot(); applyStep(curStep,0); render(); announceStep(curStep); }
+  else { elapsed=0; snapshot(); applyStep(curStep,0); render(); }
+});
+
+const scrub = document.getElementById('scrub');
+scrub.addEventListener('input', ()=>{
+  playing=false; updatePlayBtn();
+  const frac = scrub.value/1000;
+  const totalMs = totalDurAll()*frac;
+  let acc=0, idx=0, local=0;
+  for(let i=0;i<STEPS.length;i++){
+    if(totalMs <= acc+STEPS[i].dur || i===STEPS.length-1){ idx=i; local=totalMs-acc; break; }
+    acc += STEPS[i].dur;
+  }
+  curStep=idx; elapsed=Math.max(0,local);
+  snapshot();
+  applyStep(curStep, elapsed/STEPS[curStep].dur);
+  render();
+  announceStep(curStep);
+});
+
+function refreshTelemetry(){
+  const st = STEPS[curStep];
+  document.getElementById('phaseTag').textContent = st.phase;
+  document.getElementById('tStepName').innerHTML = st.title + `<span class="sub">${st.sub}</span>`;
+  document.getElementById('tTemp').textContent = S.bondheadTemp.toFixed(1)+'°C';
+  document.getElementById('tForce').textContent = S.bondheadForce.toFixed(1)+' N';
+  document.getElementById('tZ').textContent = st.z;
+  document.getElementById('tVac').textContent = (S.stageVacuumOn? 'STAGE ' : '') + (S.pickVacuumOn? 'PICK ':'') + ((!S.stageVacuumOn && !S.pickVacuumOn)?'OFF':'ON');
+  document.getElementById('tTimer').textContent = (elapsed/1000).toFixed(2)+' s';
+  document.getElementById('sideNote').textContent = st.sideNote;
+  document.getElementById('topNote').textContent = st.topNote;
+  phaseSelect.value = curStep;
+  document.getElementById('scrubLabel').textContent = `Step ${curStep+1} / ${STEPS.length}`;
+  let acc=0; for(let i=0;i<curStep;i++) acc+=STEPS[i].dur;
+  acc += elapsed;
+  scrub.value = Math.round((acc/totalDurAll())*1000);
+
+  const badge = document.getElementById('qcbadge');
+  if(S.qc){ badge.classList.add('show'); } else { badge.classList.remove('show'); }
+}
+
+function drawSide(){
+  sctx.clearRect(0,0,SW,SH);
+
+  sctx.fillStyle = '#0A0F15';
+  sctx.fillRect(0, STAGE_Y_SIDE+40, SW, 60);
+  sctx.strokeStyle = '#1B2733';
+  sctx.lineWidth=1;
+  sctx.beginPath(); sctx.moveTo(0,STAGE_Y_SIDE+40); sctx.lineTo(SW,STAGE_Y_SIDE+40); sctx.stroke();
+
+  const heatGlow = clamp((S.stageTemp-25)/(80-25));
+  sctx.fillStyle = '#2B3542';
+  roundRect(sctx, STX.align-140, STAGE_Y_SIDE, 280, 34, 4); sctx.fill();
+  const hg = sctx.createLinearGradient(STX.align-140,0,STX.align+140,0);
+  hg.addColorStop(0,'rgba(232,163,61,0)');
+  hg.addColorStop(0.5,`rgba(232,163,61,${0.15+0.35*heatGlow})`);
+  hg.addColorStop(1,'rgba(232,163,61,0)');
+  sctx.fillStyle=hg;
+  sctx.fillRect(STX.align-140, STAGE_Y_SIDE+6, 280, 10);
+  sctx.fillStyle='#FFFFFF'; sctx.font='bold 12px monospace'; sctx.textAlign='center';
+  sctx.fillText('HEATED STAGE / ANVIL  ('+S.stageTemp.toFixed(0)+'°C)', STX.align, STAGE_Y_SIDE+24);
+
+  if(S.substrateIn){
+    sctx.fillStyle='#2E8B57';
+    roundRect(sctx, STX.align-140, STAGE_Y_SIDE-14, 280, 30, 3); sctx.fill();
+    sctx.strokeStyle='#4FBE8A'; sctx.lineWidth=1; sctx.strokeRect(STX.align-140, STAGE_Y_SIDE-14, 280, 30);
+    sctx.fillStyle='#C9A24B';
+    for(let i=0;i<7;i++){
+      if(i===3) continue;
+      const px = STX.align-120 + i*40;
+      sctx.fillRect(px-5, STAGE_Y_SIDE-17, 10, 4);
+    }
+    sctx.fillStyle='#E0B75C';
+    sctx.fillRect(STX.align-16, STAGE_Y_SIDE-17, 10, 4);
+    sctx.fillRect(STX.align+6,  STAGE_Y_SIDE-17, 10, 4);
+    sctx.strokeStyle='#8A6A2E'; sctx.lineWidth=1;
+    sctx.strokeRect(STX.align-16, STAGE_Y_SIDE-17, 10, 4);
+    sctx.strokeRect(STX.align+6, STAGE_Y_SIDE-17, 10, 4);
+  }
+  if(S.stageVacuumOn){
+    sctx.fillStyle='#3ECF6A'; sctx.font='9px monospace'; sctx.textAlign='left';
+    sctx.fillText('● STAGE VAC −85 kPa', STX.align-138, STAGE_Y_SIDE-20);
+  }
+
+  const waferCX = STX.wafer, waferCY = STAGE_Y_SIDE-2;
+  sctx.strokeStyle='#3A4656'; sctx.lineWidth=3;
+  sctx.beginPath(); sctx.ellipse(waferCX, waferCY+6, 118, 10, 0, 0, Math.PI*2); sctx.stroke();
+  sctx.fillStyle='#182029';
+  sctx.beginPath(); sctx.ellipse(waferCX, waferCY, 110, 8, 0, 0, Math.PI*2); sctx.fill();
+  sctx.strokeStyle='rgba(120,190,255,0.25)'; sctx.lineWidth=1;
+  sctx.beginPath(); sctx.ellipse(waferCX, waferCY, 110, 8, 0, 0, Math.PI); sctx.stroke();
+  for(let i=-4;i<=4;i++){
+    if(i===0 && S.dieOwner!=='wafer') continue;
+    const dx = waferCX + i*22;
+    sctx.fillStyle = i===0? '#4A6B8A' : '#33404F';
+    sctx.fillRect(dx-8, waferCY-9, 16, 9);
+    sctx.fillStyle='#C9A24B';
+    sctx.fillRect(dx-6, waferCY-11, 3, 3);
+    sctx.fillRect(dx+3, waferCY-11, 3, 3);
+  }
+  const ejY = lerp(0,7,S.ejectorZ);
+  sctx.strokeStyle='#8A97A6'; sctx.lineWidth=2;
+  [-6,-2,2,6].forEach(o=>{
+    sctx.beginPath();
+    sctx.moveTo(waferCX+o, waferCY+16);
+    sctx.lineTo(waferCX+o, waferCY+16-ejY);
+    sctx.stroke();
+  });
+  if(S.scanning){
+    const sx = waferCX-108 + S.scanX*216;
+    sctx.strokeStyle='rgba(55,231,224,0.85)'; sctx.lineWidth=1.5;
+    sctx.beginPath(); sctx.moveTo(sx, waferCY-40); sctx.lineTo(sx, waferCY+8); sctx.stroke();
+    sctx.fillStyle='#37E7E0'; sctx.beginPath(); sctx.arc(sx,waferCY-42,3,0,Math.PI*2); sctx.fill();
+  }
+  sctx.fillStyle='#FFFFFF'; sctx.font='bold 12px monospace'; sctx.textAlign='center';
+  sctx.fillText('300mm Diced Bumped Wafer On Dicing Tape', waferCX, waferCY+36);
+
+  const pedCX = STX.pedestal, pedCY = STAGE_Y_SIDE-4;
+  const pedRotRad = (S.pedestalAngle/180)*Math.PI;
+  const pedSquash = Math.abs(Math.cos(pedRotRad));
+  const RING_INNER_RX = PEDESTAL_RING.innerRx, RING_INNER_RY = PEDESTAL_RING.innerRy;
+  const RING_BAND = PEDESTAL_RING.band;
+  sctx.strokeStyle='#3A4656'; sctx.lineWidth=RING_BAND;
+  sctx.beginPath(); sctx.ellipse(pedCX, pedCY, RING_INNER_RX+RING_BAND/2, Math.max(1,(RING_INNER_RY+RING_BAND/2)*pedSquash), 0, 0, Math.PI*2); sctx.stroke();
+  sctx.fillStyle='#0A0F15';
+  sctx.beginPath(); sctx.ellipse(pedCX, pedCY, RING_INNER_RX, Math.max(0.6,RING_INNER_RY*pedSquash), 0, 0, Math.PI*2); sctx.fill();
+  if(S.pedestalVacuumOn){
+    sctx.strokeStyle='#3ECF6A'; sctx.lineWidth=1;
+    sctx.beginPath(); sctx.ellipse(pedCX, pedCY, RING_INNER_RX+3, Math.max(0.8,(RING_INNER_RY+3)*pedSquash), 0, 0, Math.PI*2); sctx.stroke();
+  }
+  sctx.fillStyle='#FFFFFF'; sctx.font='bold 12px monospace'; sctx.textAlign='center';
+  sctx.fillText('RING VACUUM PEDESTAL  '+S.pedestalAngle.toFixed(0)+'°', pedCX, pedCY+36);
+
+  if(S.dieOwner==='pick' || S.dieOwner==='wafer' || STEPS[curStep].mech==='pedestal_handoff' || S.armFade>0.001){
+    sctx.save();
+    sctx.globalAlpha = S.armFade;
+    const cx = (S.dieOwner==='wafer')? STX.wafer : S.dieX;
+    const ARM_UP = 50;
+    const ARM_CONTACT = 313;
+    let armY = ARM_UP;
+    if(STEPS[curStep].mech === 'pick_contact'){
+      const p = curProgress;
+      if(p < 0.35)      armY = lerp(ARM_UP, ARM_CONTACT, easeInOut(p/0.35));
+      else if(p < 0.55) armY = ARM_CONTACT;
+      else              armY = lerp(ARM_CONTACT, ARM_UP, easeInOut((p-0.55)/0.45));
+    } else if(STEPS[curStep].mech === 'pedestal_handoff'){
+      const p = curProgress;
+      if(p < 0.45)       armY = ARM_UP;
+      else if(p < 0.75)  armY = lerp(ARM_UP, ARM_CONTACT, easeInOut((p-0.45)/0.30));
+      else if(p < 0.88)  armY = ARM_CONTACT;
+      else               armY = lerp(ARM_CONTACT, ARM_UP, easeInOut((p-0.88)/0.12));
+    }
+    sctx.fillStyle='#4A5A6E';
+    sctx.fillRect(cx-3, armY, 6, 70);
+    roundRect(sctx, cx-14, armY+64, 28, 12, 3); sctx.fill();
+    if(S.pickVacuumOn){
+      sctx.strokeStyle='#3ECF6A'; sctx.lineWidth=1;
+      sctx.beginPath(); sctx.arc(cx, armY+76, 9, 0, Math.PI*2); sctx.stroke();
+    }
+    sctx.fillStyle='#FFFFFF'; sctx.font='bold 11px monospace'; sctx.textAlign='center';
+    sctx.fillText('PICK & PLACE ARM', cx, armY-9);
+    if(S.dieOwner==='pick'){
+      sctx.fillStyle='#4A6B8A';
+      sctx.fillRect(cx-11, armY+76, 22, 10);
+      sctx.fillStyle='#C9A24B';
+      sctx.fillRect(cx-7, armY+72, 3,4); sctx.fillRect(cx+4, armY+72, 3,4);
+    }
+    sctx.restore();
+  }
+
+  sctx.fillStyle='#1E2A36';
+  sctx.beginPath(); sctx.ellipse(STX.flux, STAGE_Y_SIDE-4, 46, 8, 0, 0, Math.PI*2); sctx.fill();
+  sctx.strokeStyle='rgba(180,140,255,0.5)'; sctx.lineWidth=1;
+  sctx.beginPath(); sctx.ellipse(STX.flux, STAGE_Y_SIDE-4, 46, 8, 0, 0, Math.PI*2); sctx.stroke();
+  sctx.fillStyle='#FFFFFF'; sctx.font='bold 12px monospace'; sctx.textAlign='center';
+  sctx.fillText('FLUX FILM PLATE', STX.flux, STAGE_Y_SIDE+26);
+  if(S.fluxDip>0.01){
+    sctx.strokeStyle='rgba(180,140,255,0.8)'; sctx.lineWidth=1;
+    sctx.beginPath(); sctx.arc(STX.flux, STAGE_Y_SIDE-4, 20*S.fluxDip+4, 0, Math.PI*2); sctx.stroke();
+  }
+
+  {
+    const t = clamp(S.bondheadTemp);
+    let baseColor;
+    if(t<=160) baseColor = mixColor('#E8A33D','#F08A2E', clamp((t-120)/40));
+    else if(t<=220) baseColor = mixColor('#F08A2E','#FF5A3C', clamp((t-160)/60));
+    else baseColor = mixColor('#FF5A3C','#FF2D2D', clamp((t-220)/65));
+
+    let hx = headWaypointX(S.bondheadX);
+
+    const HEAD_UP = 150;
+    const HEAD_DOWN = 316;
+    const curMech = STEPS[curStep].mech;
+    let headTopY;
+    if(curMech === 'bondhead_pickup'){
+      const p = curProgress;
+      const PICKUP_DOWN = (STAGE_Y_SIDE-4) - 66;
+      if(p < 0.4)       headTopY = lerp(HEAD_UP, PICKUP_DOWN, easeInOut(p/0.4));
+      else if(p < 0.6)  headTopY = PICKUP_DOWN;
+      else              headTopY = lerp(PICKUP_DOWN, HEAD_UP, easeInOut((p-0.6)/0.4));
+    } else if(curMech === 'flux_contact'){
+      const p = curProgress;
+      if(p < 0.35)      headTopY = lerp(HEAD_UP, HEAD_DOWN, easeInOut(p/0.35));
+      else if(p < 0.55) headTopY = HEAD_DOWN;
+      else              headTopY = lerp(HEAD_DOWN, HEAD_UP, easeInOut((p-0.55)/0.45));
+    } else if(curMech === 'bond_touchdown'){
+      const p = curProgress;
+      headTopY = (p < 0.3) ? lerp(HEAD_UP, HEAD_DOWN, easeInOut(p/0.3)) : HEAD_DOWN;
+    } else if(curMech === 'bond_held'){
+      headTopY = HEAD_DOWN;
+    } else if(curMech === 'bond_retract'){
+      headTopY = lerp(HEAD_DOWN, HEAD_UP, easeInOut(curProgress));
+    } else {
+      headTopY = HEAD_UP + (1-clamp(S.bondheadZGap))*10;
+    }
+    const dieHangY = headTopY + 66;
+
+    if(S.gasJets>0.02){
+      sctx.strokeStyle = `rgba(143,217,255,${0.25+0.5*S.gasJets})`;
+      sctx.lineWidth=2;
+      [-26,-14,14,26].forEach(o=>{
+        sctx.beginPath();
+        sctx.moveTo(hx+o, headTopY+55);
+        sctx.lineTo(hx+o*1.3, headTopY+55+30*S.gasJets);
+        sctx.stroke();
+      });
+      sctx.fillStyle = `rgba(143,217,255,${0.10*S.gasJets})`;
+      sctx.beginPath(); sctx.arc(hx, dieHangY+8, 40, 0, Math.PI*2); sctx.fill();
+    }
+
+    sctx.fillStyle = '#2B3542';
+    roundRect(sctx, hx-34, headTopY, 68, 46, 5); sctx.fill();
+    sctx.strokeStyle = baseColor; sctx.lineWidth=3;
+    roundRect(sctx, hx-34, headTopY, 68, 46, 5); sctx.stroke();
+    sctx.fillStyle = baseColor;
+    sctx.globalAlpha = 0.55 + 0.35*Math.sin(performance.now()/120)*Math.min(1,(t-100)/200)*0+0.35;
+    roundRect(sctx, hx-22, headTopY+10, 44, 20, 4); sctx.fill();
+    sctx.globalAlpha=1;
+
+    sctx.strokeStyle='#4A5A6E'; sctx.lineWidth=4;
+    sctx.beginPath(); sctx.moveTo(hx,headTopY+46); sctx.lineTo(hx, dieHangY-6); sctx.stroke();
+
+    sctx.fillStyle='#FFFFFF'; sctx.font='bold 12px monospace'; sctx.textAlign='center';
+    sctx.fillText('TCB BONDING HEAD', hx, headTopY-11);
+
+    let dieDrawX = null, dieDrawY = null, bumpsDown=false;
+    if(S.dieOwner==='pedestal'){ dieDrawX=STX.pedestal; dieDrawY=pedCY; bumpsDown = S.pedestalAngle>90; }
+    else if(S.dieOwner==='bondhead'){ dieDrawX=hx; dieDrawY=dieHangY; bumpsDown=true; }
+    else if(S.dieOwner==='pick'){ }
+    else if(S.dieOwner==='substrate'){ dieDrawX=STX.align; dieDrawY=STAGE_Y_SIDE-14-4; bumpsDown=true; }
+    else if(S.dieOwner==='wafer'){ }
+
+    if(dieDrawX!==null){
+      sctx.save();
+      sctx.translate(dieDrawX,dieDrawY);
+      if(S.dieOwner==='pedestal'){
+        sctx.scale(1, Math.max(0.04, pedSquash));
+      }
+      const zoomed = (S.dieOwner==='bondhead' && S.bondheadX>2) || S.dieOwner==='substrate';
+      sctx.fillStyle='#4A6B8A';
+      if(zoomed) sctx.fillRect(-15,-6,30,12);
+      else sctx.fillRect(-11,-5,22,10);
+      let capColor='#C9A24B';
+      let compress=0;
+      if(S.dieOwner==='bondhead'){
+        if(STEPS[curStep].mech === 'bond_retract'){
+          capColor = '#B5793A';
+          compress = 1;
+        } else {
+          if(S.bondheadTemp>250) capColor='#FF6B4A';
+          else if(S.bondheadTemp>180) capColor='#E8934D';
+          compress = clamp(S.bondheadForce/45);
+        }
+      } else if(S.dieOwner==='substrate'){
+        capColor='#B5793A';
+        compress = 1;
+      }
+      sctx.fillStyle=capColor;
+      if(bumpsDown){
+        if(zoomed){
+          const bumpBottom = 8;
+          const bumpH = lerp(8,3,compress);
+          const bumpW = lerp(6,12,compress);
+          const bumpTop = bumpBottom - bumpH;
+          sctx.fillRect(-11-bumpW/2, bumpTop, bumpW, bumpH);
+          sctx.fillRect(11-bumpW/2, bumpTop, bumpW, bumpH);
+        } else {
+          const bumpBottom = 7;
+          const bumpH = lerp(4,1.5,compress);
+          const bumpW = lerp(3,5.5,compress);
+          const bumpTop = bumpBottom - bumpH;
+          sctx.fillRect(-7-(bumpW-3)/2, bumpTop, bumpW, bumpH);
+          sctx.fillRect(4-(bumpW-3)/2, bumpTop, bumpW, bumpH);
+        }
+      } else {
+        sctx.fillRect(-7, -7, 3,4); sctx.fillRect(4, -7, 3,4);
+      }
+      sctx.restore();
+    }
+
+    if(S.opticsIn){
+      const gapTop = dieHangY + 6;
+      const gapBottom = STAGE_Y_SIDE - 16;
+      const oy = (gapTop + gapBottom) / 2;
+      const opX = hx;
+      sctx.fillStyle='#22303F';
+      roundRect(sctx, opX-90*S.opticsX-2, oy-6, 90*S.opticsX+4, 12, 3); sctx.fill();
+      if(S.opticsActive){
+        sctx.strokeStyle='rgba(55,231,224,0.85)'; sctx.lineWidth=1.5;
+        sctx.beginPath(); sctx.moveTo(opX, oy); sctx.lineTo(opX, dieHangY-4); sctx.stroke();
+        sctx.strokeStyle='rgba(255,79,216,0.85)';
+        sctx.beginPath(); sctx.moveTo(opX, oy); sctx.lineTo(opX, STAGE_Y_SIDE-16); sctx.stroke();
+      }
+      sctx.fillStyle='#FFFFFF'; sctx.font='bold 11px monospace'; sctx.textAlign='center';
+      sctx.fillText('DUAL-FOV OPTICS', hx, oy-13);
+      if(S.alignShow){
+        sctx.fillStyle='#37E7E0'; sctx.font='11px monospace'; sctx.textAlign='center';
+        sctx.fillText('ΔX:+0.2µm  ΔY:-0.1µm  Δθ:0.01°  |  ALIGNED', hx, oy+34);
+      }
+    }
+
+    if(S.bondheadForce>0.05){
+      sctx.fillStyle='rgba(255,255,255,0.06)';
+      sctx.fillRect(hx+42, headTopY, 10, 46);
+      sctx.fillStyle='#4FA8FF';
+      const fh = (S.bondheadForce/45)*46;
+      sctx.fillRect(hx+42, headTopY+46-fh, 10, fh);
+      sctx.fillStyle='#8A97A6'; sctx.font='8px monospace'; sctx.textAlign='left';
+      sctx.fillText(S.bondheadForce.toFixed(1)+'N', hx+54, headTopY+28);
+    }
+
+    if(S.releasePulse>0.02){
+      sctx.strokeStyle=`rgba(62,207,106,${S.releasePulse})`;
+      sctx.lineWidth=2;
+      sctx.beginPath(); sctx.arc(STX.align, STAGE_Y_SIDE-14, 14+18*S.releasePulse, 0, Math.PI*2); sctx.stroke();
+    }
+  }
+
+  sctx.fillStyle='#4A5566'; sctx.font='9px monospace'; sctx.textAlign='left';
+  sctx.fillText('SIDE / CROSS-SECTION VIEW', 14, 22);
+}
+
+function drawTop(){
+  tctx.clearRect(0,0,TW,TH);
+  tctx.fillStyle='#4A5566'; tctx.font='9px monospace'; tctx.textAlign='left';
+  tctx.fillText('TOP / PLAN VIEW', 14, 18);
+
+  const ROW_Y = 130;
+
+  const wCX=STX.wafer, wCY=ROW_Y, wR=110;
+  tctx.strokeStyle='#3A4656'; tctx.lineWidth=2;
+  tctx.beginPath(); tctx.arc(wCX,wCY,wR,0,Math.PI*2); tctx.stroke();
+  tctx.fillStyle='rgba(24,32,41,0.6)'; tctx.fill();
+  for(let r=-6;r<=6;r++){
+    for(let c=-6;c<=6;c++){
+      const dx=wCX+c*16, dy=wCY+r*16;
+      if(Math.hypot(c*16,r*16)>wR-8) continue;
+      const isTarget = (r===0 && c===0);
+      if(isTarget && S.dieOwner!=='wafer'){ continue; }
+      tctx.fillStyle = isTarget? '#4A6B8A' : '#2A3646';
+      tctx.fillRect(dx-6,dy-6,12,12);
+    }
+  }
+  tctx.fillStyle='#FFFFFF'; tctx.font='bold 12px monospace'; tctx.textAlign='center';
+  tctx.fillText('300mm Diced Bumped Wafer On Dicing Tape', wCX, wCY+wR+18);
+  if(S.scanning){
+    const sx = wCX-wR+ S.scanX*wR*2;
+    tctx.strokeStyle='rgba(55,231,224,0.85)'; tctx.lineWidth=1.5;
+    tctx.beginPath(); tctx.moveTo(sx, wCY-wR); tctx.lineTo(sx, wCY+wR); tctx.stroke();
+  }
+
+  const fCX=STX.pedestal, fCY=ROW_Y;
+  const pedStrokeR = PEDESTAL_RING.innerRx + PEDESTAL_RING.band/2;
+  const pedOuterR  = PEDESTAL_RING.innerRx + PEDESTAL_RING.band;
+  tctx.strokeStyle='#3A4656'; tctx.lineWidth=PEDESTAL_RING.band;
+  tctx.beginPath(); tctx.arc(fCX,fCY,pedStrokeR,0,Math.PI*2); tctx.stroke();
+  tctx.fillStyle='#0A0F15';
+  tctx.beginPath(); tctx.arc(fCX,fCY,PEDESTAL_RING.innerRx,0,Math.PI*2); tctx.fill();
+  const ang = (-90 + S.pedestalAngle)*Math.PI/180;
+  tctx.strokeStyle='#37E7E0'; tctx.lineWidth=2;
+  tctx.beginPath(); tctx.moveTo(fCX,fCY); tctx.lineTo(fCX+pedOuterR*Math.cos(ang), fCY+pedOuterR*Math.sin(ang)); tctx.stroke();
+  tctx.fillStyle='#FFFFFF'; tctx.font='bold 12px monospace'; tctx.textAlign='center';
+  tctx.fillText('RING VACUUM PEDESTAL', fCX, fCY+pedOuterR+18);
+
+  const xCX=STX.flux, xCY=ROW_Y, xR=46;
+  tctx.strokeStyle='rgba(180,140,255,0.5)'; tctx.lineWidth=2;
+  tctx.beginPath(); tctx.arc(xCX,xCY,xR,0,Math.PI*2); tctx.stroke();
+  if(S.fluxDip>0.01){
+    tctx.strokeStyle='rgba(180,140,255,0.9)';
+    tctx.beginPath(); tctx.arc(xCX,xCY,10+14*S.fluxDip,0,Math.PI*2); tctx.stroke();
+  }
+  tctx.fillStyle='#FFFFFF'; tctx.font='bold 12px monospace'; tctx.textAlign='center';
+  tctx.fillText('FLUX FILM PLATE', xCX, xCY+xR+18);
+
+  const stX = STX.align, stY = STAGE_Y_TOP-20;
+
+  tctx.fillStyle = '#2B3542';
+  roundRect(tctx, stX-140, stY-46, 280, 92, 4); tctx.fill();
+  tctx.strokeStyle = 'rgba(232,163,61,0.35)'; tctx.lineWidth=1;
+  roundRect(tctx, stX-140, stY-46, 280, 92, 4); tctx.stroke();
+  tctx.fillStyle='#FFFFFF'; tctx.font='bold 12px monospace'; tctx.textAlign='center';
+  tctx.fillText('HEATED STAGE / ANVIL', stX, stY-70);
+
+  let markerX = null, markerY = ROW_Y, onSubstrate = false;
+  if(S.dieOwner==='wafer') { markerX=wCX; }
+  else if(S.dieOwner==='pick'){ markerX = lerp(wCX,fCX,S.pickX); }
+  else if(S.dieOwner==='pedestal'){ markerX=fCX; }
+  else if(S.dieOwner==='bondhead'){
+    const q = S.bondheadX-1;
+    if(q<=1){ markerX = lerp(fCX,xCX,q); markerY = ROW_Y; }
+    else{
+      const q2 = q-1;
+      markerX = lerp(xCX, stX, q2);
+      markerY = lerp(ROW_Y, stY, q2);
+      onSubstrate = q2 > 0.97;
+    }
+  } else if(S.dieOwner==='substrate'){ markerX=stX; markerY=stY; onSubstrate=true; }
+
+  if(S.substrateIn){
+    tctx.strokeStyle='#4FBE8A'; tctx.lineWidth=2;
+    roundRect(tctx, stX-140, stY-46, 280, 92, 4); tctx.stroke();
+    tctx.fillStyle='rgba(46,139,87,0.55)'; roundRect(tctx, stX-140, stY-46, 280, 92, 4); tctx.fill();
+    const padXOffsets = [-120,-80,-40,-11,11,40,80,120];
+    for(let r=0;r<3;r++){
+      for(let ci=0; ci<8; ci++){
+        const isTarget = (r===1 && (ci===3 || ci===4));
+        if(isTarget && onSubstrate) continue;
+        const px = stX + padXOffsets[ci], py = stY-26 + r*26;
+        tctx.fillStyle = isTarget ? '#E0B75C' : '#C9A24B';
+        tctx.fillRect(px-5,py-6,10,12);
+      }
+    }
+    tctx.fillStyle='#FFFFFF'; tctx.font='bold 12px monospace'; tctx.textAlign='center';
+    tctx.fillText('SUBSTRATE STAGE — BOND SITE GRID', stX, stY+58);
+  }
+
+  if(markerX!==null){
+    if(onSubstrate){
+      tctx.save();
+      tctx.translate(markerX, markerY);
+      let dieColor = '#FF9F4A';
+      if(S.dieOwner==='bondhead'){
+        if(S.bondheadTemp>250) dieColor='#FF6B4A';
+        else if(S.bondheadTemp>180) dieColor='#E8934D';
+      } else if(S.dieOwner==='substrate'){ dieColor='#3ECF6A'; }
+      tctx.fillStyle=dieColor;
+      roundRect(tctx,-15,-6,30,12,2); tctx.fill();
+      tctx.strokeStyle='#FFD9AE'; tctx.lineWidth=1; roundRect(tctx,-15,-6,30,12,2); tctx.stroke();
+      tctx.fillStyle='#1A1208';
+      tctx.fillRect(-6,-2,4,4); tctx.fillRect(2,-2,4,4);
+      tctx.restore();
+    } else {
+      tctx.fillStyle='#FF9F4A';
+      tctx.beginPath(); tctx.arc(markerX,markerY,7,0,Math.PI*2); tctx.fill();
+      tctx.strokeStyle='#FFD9AE'; tctx.lineWidth=1.5; tctx.stroke();
+    }
+  }
+
+  if(S.opticsIn){
+    const oy = stY;
+    const barW = 90*S.opticsX;
+    tctx.fillStyle='rgba(34,48,63,0.9)';
+    tctx.fillRect(stX-barW-2, oy-4, barW+4, 8);
+    if(S.opticsActive){
+      tctx.strokeStyle='rgba(55,231,224,0.6)'; tctx.lineWidth=1;
+      tctx.beginPath(); tctx.arc(stX, oy, 5,0,Math.PI*2); tctx.stroke();
+      tctx.strokeStyle='rgba(255,79,216,0.6)';
+      tctx.beginPath(); tctx.arc(stX, oy, 9,0,Math.PI*2); tctx.stroke();
+    }
+  }
+  if(S.alignShow){
+    tctx.fillStyle='#37E7E0'; tctx.font='10px monospace'; tctx.textAlign='center';
+    tctx.fillText('ΔX:+0.2µm ΔY:-0.1µm Δθ:0.01°', stX, stY-58);
+  }
+}
+
+function render(){
+  drawSide();
+  drawTop();
+  refreshTelemetry();
+}
+
+snapshot();
+applyStep(0,0);
+render();
+
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,248 @@
+{
+  "pbtResults": {},
+  "executionHistory": {
+    "1.1 Add bondTransfer property and setBondTransfer method to BonderController": [
+      {
+        "executionId": "c04e1f75-176d-4639-97b2-b981914ce77a",
+        "chatSessionId": "sess_ad89b6bf-6d9e-415e-bbed-925809683d00",
+        "timestamp": 1787912812652
+      },
+      {
+        "executionId": "c04e1f75-176d-4639-97b2-b981914ce77a",
+        "chatSessionId": "sess_ad89b6bf-6d9e-415e-bbed-925809683d00",
+        "timestamp": 1787912825161
+      },
+      {
+        "executionId": "c04e1f75-176d-4639-97b2-b981914ce77a",
+        "chatSessionId": "sess_ad89b6bf-6d9e-415e-bbed-925809683d00",
+        "timestamp": 1787916624801
+      }
+    ],
+    "1.2 Add helper methods for async operations": [
+      {
+        "executionId": "c04e1f75-176d-4639-97b2-b981914ce77a",
+        "chatSessionId": "sess_ad89b6bf-6d9e-415e-bbed-925809683d00",
+        "timestamp": 1787912812739
+      },
+      {
+        "executionId": "c04e1f75-176d-4639-97b2-b981914ce77a",
+        "chatSessionId": "sess_ad89b6bf-6d9e-415e-bbed-925809683d00",
+        "timestamp": 1787912826169
+      },
+      {
+        "executionId": "c04e1f75-176d-4639-97b2-b981914ce77a",
+        "chatSessionId": "sess_ad89b6bf-6d9e-415e-bbed-925809683d00",
+        "timestamp": 1787916625552
+      }
+    ],
+    "1.3 Add position calculation methods": [
+      {
+        "executionId": "c04e1f75-176d-4639-97b2-b981914ce77a",
+        "chatSessionId": "sess_ad89b6bf-6d9e-415e-bbed-925809683d00",
+        "timestamp": 1787912812867
+      },
+      {
+        "executionId": "c04e1f75-176d-4639-97b2-b981914ce77a",
+        "chatSessionId": "sess_ad89b6bf-6d9e-415e-bbed-925809683d00",
+        "timestamp": 1787912826703
+      },
+      {
+        "executionId": "c04e1f75-176d-4639-97b2-b981914ce77a",
+        "chatSessionId": "sess_ad89b6bf-6d9e-415e-bbed-925809683d00",
+        "timestamp": 1787916626297
+      }
+    ],
+    "2.1 Implement runStage01_SubstrateLoading method": [
+      {
+        "executionId": "c04e1f75-176d-4639-97b2-b981914ce77a",
+        "chatSessionId": "sess_ad89b6bf-6d9e-415e-bbed-925809683d00",
+        "timestamp": 1787912812943
+      },
+      {
+        "executionId": "c04e1f75-176d-4639-97b2-b981914ce77a",
+        "chatSessionId": "sess_ad89b6bf-6d9e-415e-bbed-925809683d00",
+        "timestamp": 1787916632534
+      },
+      {
+        "executionId": "c04e1f75-176d-4639-97b2-b981914ce77a",
+        "chatSessionId": "sess_ad89b6bf-6d9e-415e-bbed-925809683d00",
+        "timestamp": 1787917068215
+      }
+    ],
+    "2.2 Implement runStage02_FiducialScan placeholder method": [
+      {
+        "executionId": "c04e1f75-176d-4639-97b2-b981914ce77a",
+        "chatSessionId": "sess_ad89b6bf-6d9e-415e-bbed-925809683d00",
+        "timestamp": 1787912813007
+      },
+      {
+        "executionId": "c04e1f75-176d-4639-97b2-b981914ce77a",
+        "chatSessionId": "sess_ad89b6bf-6d9e-415e-bbed-925809683d00",
+        "timestamp": 1787916633133
+      },
+      {
+        "executionId": "c04e1f75-176d-4639-97b2-b981914ce77a",
+        "chatSessionId": "sess_ad89b6bf-6d9e-415e-bbed-925809683d00",
+        "timestamp": 1787917067407
+      }
+    ],
+    "3.1 Implement runFullRecipe method": [
+      {
+        "executionId": "c04e1f75-176d-4639-97b2-b981914ce77a",
+        "chatSessionId": "sess_ad89b6bf-6d9e-415e-bbed-925809683d00",
+        "timestamp": 1787912813179
+      },
+      {
+        "executionId": "c04e1f75-176d-4639-97b2-b981914ce77a",
+        "chatSessionId": "sess_ad89b6bf-6d9e-415e-bbed-925809683d00",
+        "timestamp": 1787917075670
+      },
+      {
+        "executionId": "c04e1f75-176d-4639-97b2-b981914ce77a",
+        "chatSessionId": "sess_ad89b6bf-6d9e-415e-bbed-925809683d00",
+        "timestamp": 1787917544100
+      }
+    ],
+    "4.1 Enhance pause method to pause wafer transfer": [
+      {
+        "executionId": "c04e1f75-176d-4639-97b2-b981914ce77a",
+        "chatSessionId": "sess_ad89b6bf-6d9e-415e-bbed-925809683d00",
+        "timestamp": 1787912813242
+      },
+      {
+        "executionId": "c04e1f75-176d-4639-97b2-b981914ce77a",
+        "chatSessionId": "sess_ad89b6bf-6d9e-415e-bbed-925809683d00",
+        "timestamp": 1787917562388
+      }
+    ],
+    "4.2 Enhance resume method to resume wafer transfer": [
+      {
+        "executionId": "c04e1f75-176d-4639-97b2-b981914ce77a",
+        "chatSessionId": "sess_ad89b6bf-6d9e-415e-bbed-925809683d00",
+        "timestamp": 1787912813319
+      },
+      {
+        "executionId": "c04e1f75-176d-4639-97b2-b981914ce77a",
+        "chatSessionId": "sess_ad89b6bf-6d9e-415e-bbed-925809683d00",
+        "timestamp": 1787917563214
+      }
+    ],
+    "4.3 Enhance reset method to reset wafer transfer": [
+      {
+        "executionId": "c04e1f75-176d-4639-97b2-b981914ce77a",
+        "chatSessionId": "sess_ad89b6bf-6d9e-415e-bbed-925809683d00",
+        "timestamp": 1787912813402
+      },
+      {
+        "executionId": "c04e1f75-176d-4639-97b2-b981914ce77a",
+        "chatSessionId": "sess_ad89b6bf-6d9e-415e-bbed-925809683d00",
+        "timestamp": 1787917563915
+      }
+    ],
+    "5.1 Connect BonderController and WaferBonderTransfer": [
+      {
+        "executionId": "c04e1f75-176d-4639-97b2-b981914ce77a",
+        "chatSessionId": "sess_ad89b6bf-6d9e-415e-bbed-925809683d00",
+        "timestamp": 1787912813483
+      }
+    ],
+    "5.2 Update animation loop to drive both systems": [
+      {
+        "executionId": "c04e1f75-176d-4639-97b2-b981914ce77a",
+        "chatSessionId": "sess_ad89b6bf-6d9e-415e-bbed-925809683d00",
+        "timestamp": 1787912813555
+      }
+    ],
+    "5.3 Add full recipe control method": [
+      {
+        "executionId": "c04e1f75-176d-4639-97b2-b981914ce77a",
+        "chatSessionId": "sess_ad89b6bf-6d9e-415e-bbed-925809683d00",
+        "timestamp": 1787912813633
+      }
+    ],
+    "5.4 Update UI control button handlers": [
+      {
+        "executionId": "c04e1f75-176d-4639-97b2-b981914ce77a",
+        "chatSessionId": "sess_ad89b6bf-6d9e-415e-bbed-925809683d00",
+        "timestamp": 1787912813703
+      }
+    ],
+    "6. Checkpoint - Verify Stage 1 integration": [
+      {
+        "executionId": "c04e1f75-176d-4639-97b2-b981914ce77a",
+        "chatSessionId": "sess_ad89b6bf-6d9e-415e-bbed-925809683d00",
+        "timestamp": 1787912813781
+      }
+    ],
+    "7.1 Test complete 17-stage sequence": [
+      {
+        "executionId": "c04e1f75-176d-4639-97b2-b981914ce77a",
+        "chatSessionId": "sess_ad89b6bf-6d9e-415e-bbed-925809683d00",
+        "timestamp": 1787912813903
+      }
+    ],
+    "7.2 Test error handling scenarios": [
+      {
+        "executionId": "c04e1f75-176d-4639-97b2-b981914ce77a",
+        "chatSessionId": "sess_ad89b6bf-6d9e-415e-bbed-925809683d00",
+        "timestamp": 1787912813994
+      }
+    ],
+    "8.1 Test pause during Stage 1": [
+      {
+        "executionId": "c04e1f75-176d-4639-97b2-b981914ce77a",
+        "chatSessionId": "sess_ad89b6bf-6d9e-415e-bbed-925809683d00",
+        "timestamp": 1787912814127
+      }
+    ],
+    "8.2 Test resume from pause": [
+      {
+        "executionId": "c04e1f75-176d-4639-97b2-b981914ce77a",
+        "chatSessionId": "sess_ad89b6bf-6d9e-415e-bbed-925809683d00",
+        "timestamp": 1787912814197
+      }
+    ],
+    "8.3 Test reset at various stages": [
+      {
+        "executionId": "c04e1f75-176d-4639-97b2-b981914ce77a",
+        "chatSessionId": "sess_ad89b6bf-6d9e-415e-bbed-925809683d00",
+        "timestamp": 1787912814269
+      }
+    ],
+    "9.1 Test speed multipliers (2x, 5x, 10x)": [
+      {
+        "executionId": "c04e1f75-176d-4639-97b2-b981914ce77a",
+        "chatSessionId": "sess_ad89b6bf-6d9e-415e-bbed-925809683d00",
+        "timestamp": 1787912814342
+      }
+    ],
+    "10. Final checkpoint - Integration validation": [
+      {
+        "executionId": "c04e1f75-176d-4639-97b2-b981914ce77a",
+        "chatSessionId": "sess_ad89b6bf-6d9e-415e-bbed-925809683d00",
+        "timestamp": 1787912814419
+      }
+    ],
+    "1. Add BonderController integration infrastructure": [
+      {
+        "executionId": "c04e1f75-176d-4639-97b2-b981914ce77a",
+        "chatSessionId": "sess_ad89b6bf-6d9e-415e-bbed-925809683d00",
+        "timestamp": 1787916626468
+      }
+    ],
+    "2. Implement Stage 1 execution": [
+      {
+        "executionId": "c04e1f75-176d-4639-97b2-b981914ce77a",
+        "chatSessionId": "sess_ad89b6bf-6d9e-415e-bbed-925809683d00",
+        "timestamp": 1787917068355
+      }
+    ],
+    "3. Implement full recipe orchestration": [
+      {
+        "executionId": "c04e1f75-176d-4639-97b2-b981914ce77a",
+        "chatSessionId": "sess_ad89b6bf-6d9e-415e-bbed-925809683d00",
+        "timestamp": 1787917544165
+      }
+    ]
+  }
+}

@@ -1,0 +1,32 @@
+import { CauseEffectRow } from './types';
+
+export const CAUSE_EFFECTS: CauseEffectRow[] = [
+  { id: 1, parameter: "Stage Baseline Heating", processStep: "1", effects: { increase: "Faster thermal saturation; risk of premature flux activation or die pre-heat drift if the die dwells long before bonding", decrease: "Longer time-to-temperature at the bond site; higher chance of cold-joint formation and incomplete IMC growth during the brief reflow pulse" }, note: "Set per flux chemistry" },
+  { id: 2, parameter: "Substrate Vacuum Hold", processStep: "1", effects: { increase: "Minimal added benefit above spec; excess vacuum can pull thin/warped substrates into chuck grooves, marking the backside", decrease: "Substrate lift or micro-slip during bonding, causing placement/rotation errors and coplanarity loss" }, note: "Maintain ≥ min spec" },
+  { id: 3, parameter: "Ejector Pin Stroke Height", processStep: "3", effects: { increase: "Higher risk of die cracking, chipping, or tape puncture, especially on thin dies", decrease: "Incomplete tape release; pick failures or tape pulled along with the die" }, note: "Tune to die thickness" },
+  { id: 4, parameter: "Ejector Pin Speed", processStep: "3", effects: { increase: "Increased mechanical shock at die backside, raising micro-crack risk on thin/brittle die", decrease: "Slower cycle time; tape adhesive may 'relax' and re-grip before pickup" }, note: "Balance speed vs. yield" },
+  { id: 5, parameter: "Pick Force / Vacuum", processStep: "4", effects: { increase: "Higher contact stress on die/bumps; risk of bump deformation or surface damage", decrease: "Weak grip — die can shift, rotate, or drop mid-transfer at high accelerations" }, note: "Vacuum sensor interlock advised" },
+  { id: 6, parameter: "Flipper Rotation Velocity", processStep: "6", effects: { increase: "Greater centrifugal/vibrational loading on the vacuum seal; risk of die slip/micro-shift", decrease: "Longer cycle time per die, reducing UPH" }, note: "Throughput vs. stability trade-off" },
+  { id: 7, parameter: "Flux Film Thickness (Screed Depth)", processStep: "10", effects: { increase: "Bridging between fine-pitch bumps, post-reflow residue/voiding, or splash onto the die field", decrease: "Insufficient wetting, higher joint voiding, weak/open joints" }, note: "Critical at fine pitch (≤ 55 µm)" },
+  { id: 8, parameter: "Dip Dwell Time", processStep: "10", effects: { increase: "Flux spreads beyond bump tips onto shoulder or between bumps", decrease: "Under-wetted bump tips, higher non-wet opens risk" }, note: "Typically 100–300 ms" },
+  { id: 9, parameter: "Dual-FOV Alignment Precision (target)", processStep: "12", effects: { increase: "Tighter targets increase cycle time and re-alignment retries, reducing throughput", decrease: "Looser targets allow larger residual offset, increasing placement error and bridging/open risk" }, note: "Trade-off: accuracy vs. UPH" },
+  { id: 10, parameter: "Bond Force (Peak Reflow)", processStep: "13–14", effects: { increase: "Bumps over-compressed/flattened; squeeze-out, bridging, substrate pad damage", decrease: "Poor bump-to-pad contact, non-planar bonding, higher void content/open joints" }, note: "Tune to bump count/density" },
+  { id: 11, parameter: "Peak Reflow Temperature", processStep: "14", effects: { increase: "IMC over-growth (brittle joints), material degradation, warpage, flux carbonization", decrease: "Below-liquidus temps cause cold joints and high resistance/opens" }, note: "Set above solder liquidus + margin" },
+  { id: 12, parameter: "Reflow Ramp Rate (°C/s)", processStep: "14", effects: { increase: "Thermal shock, void entrapment (outgassing can't escape), warpage", decrease: "Extends flux dwell at high temp, promoting degradation/oxidation, longer cycle time" }, note: "Typically 100–150 °C/s" },
+  { id: 13, parameter: "Peak Reflow Dwell Time", processStep: "14", effects: { increase: "Extended time above liquidus increases IMC thickness (brittle) and thermal budget", decrease: "Insufficient time prevents full melt/IMC formation, leaving marginal joints" }, note: "Typically 1–2 s" },
+  { id: 14, parameter: "Dynamic Z-Control Window", processStep: "14", effects: { increase: "Wider window allows more bump-height variation to pass — squeeze-out on tall bumps, opens on short ones", decrease: "Overly tight window triggers false force faults on natural warpage/bump-height spread" }, note: "± 0.5 µm typical" },
+  { id: 15, parameter: "Cooling Ramp Rate", processStep: "15", effects: { increase: "Very fast quenching can induce thermal stress, IMC micro-cracking, warpage", decrease: "Slow cooling extends cycle time and can allow uncontrolled IMC growth/joint creep" }, note: "Typically 80–120 °C/s" },
+  { id: 16, parameter: "Force Held During Cooling", processStep: "15", effects: { increase: "Excess sustained force after solidification stresses brittle new IMC joints", decrease: "Releasing too early allows joint movement, voids, partial de-wetting" }, note: "Hold until below solidus" },
+  { id: 17, parameter: "Z-Axis Retraction Speed / Slow-Lift", processStep: "16", effects: { increase: "Fast retraction right after release can shock warm joints or disturb neighboring un-bonded die", decrease: "Overly slow retraction adds cycle time without further protection" }, note: "Slow-lift zone protects joint" },
+  { id: 18, parameter: "Stage Index Positioning Accuracy", processStep: "17", effects: { increase: "N/A — tighter-is-better, no meaningful 'increase'", decrease: "Looser accuracy accumulates site-to-site placement error, especially on large substrates" }, note: "Direct driver of panel-level yield" },
+  { id: 19, parameter: "Cycle Time / Index Speed", processStep: "17", effects: { increase: "Faster cycling raises UPH but increases vibration/reduces settling time, risking accuracy loss", decrease: "Slower cycling improves stability/accuracy margin but reduces throughput (UPH)" }, note: "Primary throughput lever" },
+];
+
+if (process.env.NODE_ENV !== "production") {
+  console.assert(CAUSE_EFFECTS.length === 19, "Cause/effect dataset must contain 19 parameters");
+  const ids = CAUSE_EFFECTS.map((item) => item.id);
+  console.assert(new Set(ids).size === ids.length, "Duplicate cause/effect parameter IDs detected");
+  CAUSE_EFFECTS.forEach((item) => {
+    console.assert(item.parameter && item.effects.increase && item.effects.decrease, `Incomplete cause/effect row: ${item.id}`);
+  });
+}
