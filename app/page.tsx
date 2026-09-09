@@ -4,7 +4,8 @@
 import { useState, useEffect, useCallback, useRef, Suspense } from "react"
 import { useRouter } from "next/navigation"
 import * as THREE from "three"
-import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
+// ===== GLB-REMOVED (top-level GLTFLoader import) - re-wire the new module here. See GLB_WIRING_CONTRACT.md =====
+// import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import StationIcon from '../components/StationIcon'
 import { BonderController } from '../lib/BonderController.js'
 import {
@@ -19,6 +20,8 @@ import ProcessFlowPanel from '../components/ProcessFlowPanel';
 import TcbComponentInfoPanel from '../components/TcbComponentInfoPanel';
 import { TCB_STEPS } from '../lib/data/tcbSteps';
 import { WaferBonderTransfer } from '../lib/bonder/WaferBonderTransfer.js';
+import { loadOptimizedGLB } from '../lib/loadOptimizedGLB';
+import { FlipChipRobot } from '../lib/flipChipRobot';
 
 
 
@@ -211,6 +214,132 @@ const EFEM_Z = 0;
 const EFEM_RIGHT_SIDE_YAW = -THREE.MathUtils.degToRad(90);
 const WAFER_RACK_ROTATION_Y = THREE.MathUtils.degToRad(0);
 const OUTPUT_RACK_ROTATION_Y = WAFER_RACK_ROTATION_Y + Math.PI; // 180° rotation for output rack
+// Second wafer module, served from /public by the Next.js server.
+const SECOND_RACK_URL = '/waferrxk.glb';
+// Work-surface plane shared by the input station. Matches FOUP_FLOOR_CLEARANCE
+// in _buildFoup(), so the Input Wafer and the second module rest on one plane.
+// (The scene floor itself is lower, at y = -0.52.)
+const WORK_SURFACE_Y = 1.2;
+// Footprint the wafer module is scaled to, in world units. The model is a flat
+// wafer disc (natural aspect ~11.5 : 1 : 11.4), so it needs real width to read
+// from an overview camera. Uniform scale — height follows the model's own
+// aspect ratio and is never stretched. Raise this to make the wafer bigger.
+const SECOND_MODULE_TARGET_WIDTH = 15.0;
+
+// ── PRODUCTION AXIS ─────────────────────────────────────────────────────────
+// X is the machine-flow axis, not Z. Evidence from the existing scene:
+//   ALL_STEPS runs x = -20 (foup) -> 19 (iface) -> 38 (scanner) at z ~= 0
+//   the EFEM rail clamps on X (TRACK_MIN -14 .. TRACK_MAX 22)
+//   _buildLinkBelt(startX, endX, z) draws belts along X at constant z
+// Every station below is therefore placed along X at ONE shared Z, so the line
+// reads straight. Do not introduce per-station Z offsets.
+const PRODUCTION_AXIS_Z = 1.2165;   // the single Z every station shares
+
+// ── LAYOUT: wafer rack, robot corridor, flux fixture - all on X ────────────
+//   [ FOUP RACK ] gap [ WAFER RACK ] <-- RACK_CLEARANCE --> [ FLUX FIXTURE ]
+// The wafer rack is the fixed reference; everything else is placed relative to
+// it, so nothing needs hand-typed coordinates.
+const WAFER_MODULE_X = -18;
+const WAFER_MODULE_Z = PRODUCTION_AXIS_Z;
+// Derived, never hand-typed, so it cannot drift out of sync with the width.
+const WAFER_MODULE_HALF_X = SECOND_MODULE_TARGET_WIDTH / 2;
+// Uniform scale applied to the whole rack group (model AND its anchors, so the
+// slot/pickup targets keep matching the geometry). Raise to enlarge the rack.
+const RACK_SCALE = 1.7;
+// ROBOT WORKING CORRIDOR: the minimum straight-line clearance between the wafer
+// rack area and the flux fixture working area, in three.js WORLD UNITS (not
+// pixels, not zoom). The robot picks at the rack, travels this corridor along
+// X, and approaches the fixture. FLUX_FIXTURE_POSITION is derived from it, so
+// changing this number physically moves the fixture.
+const RACK_CLEARANCE = 45.0;
+// Separate, smaller gap between the wafer rack and the black FOUP rack parked
+// beside it. Kept distinct from RACK_CLEARANCE so widening the robot corridor
+// does not fling the FOUP rack off into the distance.
+const WAFER_TO_RACK_GAP = 10.0;
+// The rack is rotated a quarter turn about the vertical (Y) axis, which swaps
+// its footprint: FOUP_WIDTH 3.2 (X) x FOUP_LENGTH 2.8 (Z) becomes 2.8 x 3.2,
+// then RACK_SCALE enlarges it.
+const RACK_QUARTER_TURN = Math.PI / 2;
+const RACK_ROTATED_HALF_X = (2.8 / 2) * RACK_SCALE;  // FOUP_LENGTH/2, scaled
+// FOUP rack sits on the -X side of the wafer, i.e. UPSTREAM of the production
+// flow, so it never intrudes into the robot corridor on the +X side.
+const RACK_RELOCATED_X =
+  WAFER_MODULE_X - WAFER_MODULE_HALF_X - WAFER_TO_RACK_GAP - RACK_ROTATED_HALF_X;
+const RACK_RELOCATED_MAX_X = RACK_RELOCATED_X + RACK_ROTATED_HALF_X;
+
+// ── FLUX FIXTURE (public/flux_fixture.glb) ──────────────────────────────────
+// Real GLB, loaded through the same loadOptimizedGLB path as every other model.
+// Natural size 2.400 x 1.655 x 1.440, base at local y -0.18, 39 meshes,
+// named parts BasePlate / FluxSurface / TrayPart / Chip / Pad, clip
+// "FluxAnimation".
+const FLUX_FIXTURE_URL = '/flux_fixture.glb';
+// ►► FLUX FIXTURE SIZE KNOB ◄◄
+// One normalisation factor applied at load, NOT a camera trick. Raise this
+// number to enlarge the fixture. Natural size is 2.40 x 1.655 x 1.44.
+//   x2 -> 4.80 wide, 3.31 tall  (current: matches the 4.76-wide FOUP rack)
+//   x3 -> 7.20 wide, 4.97 tall
+// FLUX_FIXTURE_HALF_X below is derived from it, so the 30-unit clearance to the
+// wafer rack is preserved automatically whatever value you choose.
+const FLUX_FIXTURE_SCALE = 4.0;
+const FLUX_FIXTURE_NATURAL_WIDTH = 2.4;
+const FLUX_FIXTURE_HALF_X = (FLUX_FIXTURE_NATURAL_WIDTH * FLUX_FIXTURE_SCALE) / 2;
+// THE single source of truth for where the fixture lives. Derived from the
+// wafer rack's +X edge plus the robot corridor, so the 30-unit clearance is a
+// real world-space distance rather than an eyeballed coordinate.
+const FLUX_FIXTURE_POSITION = {
+  x: WAFER_MODULE_X + WAFER_MODULE_HALF_X + RACK_CLEARANCE + FLUX_FIXTURE_HALF_X,
+  y: WORK_SURFACE_Y,
+  z: PRODUCTION_AXIS_Z,
+};
+
+// ── SUBSTRATE ALIGN STAGE (public/SUBSTAGE_Align.glb) ───────────────────────
+// The station AFTER the flux fixture: the chip is dipped in flux, then placed
+// and aligned here. Natural size 0.280 x 0.043 x 0.140, 6 meshes, 7,626 tris,
+// no animation. Named parts SUBSTAGE_ActiveSite / AnvilBase / BondPads /
+// Carrier / MountDetails.
+const SUBSTAGE_URL = '/SUBSTAGE_Align.glb';
+// ►► SUBSTAGE SIZE KNOB ◄◄ - normalises the asset's metres to scene units.
+//   x35 ->  9.80 x 1.49 x 4.90  (current - matches the flux fixture's width)
+//   x50 -> 14.00 x 2.13 x 7.00
+const SUBSTAGE_SCALE = 35;
+const SUBSTAGE_NATURAL_WIDTH = 0.28;
+const SUBSTAGE_HALF_X = (SUBSTAGE_NATURAL_WIDTH * SUBSTAGE_SCALE) / 2;
+// Gap between the flux fixture's +X edge and this stage's -X edge.
+const SUBSTAGE_GAP = 6.0;
+// Derived from the flux fixture, so it always follows it down the line.
+const SUBSTAGE_POSITION = {
+  x: FLUX_FIXTURE_POSITION.x + FLUX_FIXTURE_HALF_X + SUBSTAGE_GAP + SUBSTAGE_HALF_X,
+  y: WORK_SURFACE_Y,
+  z: PRODUCTION_AXIS_Z,
+};
+
+// ── FLIP CHIP ROBOT (public/FlipChip_Robotfinal.glb) ────────────────────────
+// Stands IN the robot working corridor, between the wafer rack and the flux
+// fixture. Driven by lib/flipChipRobot.ts (the asset author's controller): the
+// rig's Rotary_Actuator has a non-identity rest quaternion, so its joints must
+// not be posed with plain rotation.x/y/z writes.
+const FLIP_ROBOT_URL = '/FlipChip_Robotfinal.glb';
+// ►► ROBOT SIZE KNOB ◄◄
+// The GLB is authored in METRES (base platform 0.60 x 0.35 m, 0.31 m tall), so
+// it must be normalised to scene units. Raise this number to enlarge the robot.
+// Measured against the real asset at RACK_CLEARANCE 45 (loaded fresh, not
+// cloned - clone(true) does not reproduce skinned-mesh bind state and reports
+// a shorter box than the robot really is):
+//   x20 -> 12.00 x  6.48 x  7.00   (16.50 clear to each neighbour)
+//   x30 -> 18.00 x  9.71 x 10.50   (13.50 clear)
+//   x40 -> 24.00 x 12.95 x 14.00   (current - 10.50 clear)
+//   x50 -> 30.00 x 16.19 x 17.50   (7.50 clear)
+//   x60 -> 36.00 x 19.43 x 21.00   (4.50 clear)
+//   x70 -> 42.00 x 22.67 x 24.50   (1.50 clear - practical ceiling)
+// Headroom scales with RACK_CLEARANCE. Raise that first if you want more.
+const FLIP_ROBOT_SCALE = 40;
+// Dead centre of the corridor: midway between the wafer rack's +X edge and the
+// flux fixture's -X edge, on the shared production axis.
+const FLIP_ROBOT_POSITION = {
+  x: (WAFER_MODULE_X + WAFER_MODULE_HALF_X + (FLUX_FIXTURE_POSITION.x - FLUX_FIXTURE_HALF_X)) / 2,
+  y: WORK_SURFACE_Y,
+  z: PRODUCTION_AXIS_Z,
+};
 const FIRST_RACK_OFFSET_Z = 6.5;
 const ROBOT_OFFSET_Z = 2.5;
 const ALL_STEPS: ProcessStep[] = [
@@ -4528,700 +4657,701 @@ export class DevPuddleOverlay {
 // }
 
 
-function buildRobotGLB(
-  scene: THREE.Scene,
-  basePos: THREE.Vector3,
-  ledColor = 0x00ff88,
-  scale = 0.35,
-  onReady: (robot: RobotObject) => void,
-  baseYaw = EFEM_RIGHT_SIDE_YAW
-): void {
-  const loader = new GLTFLoader();
-  loader.load(
-    '/roboticarm.glb',
-    (gltf: any) => {
-      const root = gltf.scene as THREE.Group;
-      root.scale.setScalar(scale);
-      // Mount the robot rotated toward its wafer-rack. IK below compensates
-      // for this local base yaw when aiming at world targets.
-      root.rotation.y = baseYaw;
-      scene.add(root);
-
-      // Validate transforms
-      root.traverse((obj) => {
-        if (obj instanceof THREE.Group || (obj as THREE.Mesh).isMesh) {
-          obj.quaternion.normalize();
-        }
-      });
-
-      // Snap to floor
-      const box = new THREE.Box3().setFromObject(root);
-      const FLOOR_Y = 0.3;
-      root.position.set(basePos.x, FLOOR_Y - box.min.y, basePos.z);
-
-      // Shadows + LEDs
-      root.traverse((obj: THREE.Object3D) => {
-        if ((obj as THREE.Mesh).isMesh) {
-          obj.castShadow = true;
-          obj.receiveShadow = true;
-          const mesh = obj as THREE.Mesh;
-          const mat = mesh.material as THREE.MeshStandardMaterial;
-          if (mat && mat.name && (mat.name.includes('LED') || mat.name.includes('emit'))) {
-            mat.emissive = new THREE.Color(ledColor);
-            mat.emissiveIntensity = 2.5;
-          }
-        }
-      });
-
-      // Hide rigging helpers from old file (left in just in case GLB has them)
-      const HIDDEN = ['BezierCircle', 'IK', 'CameraTarget', 'Curve', 'Empty', 'Pole'];
-      root.traverse((obj) => {
-        const name = obj.name || '';
-        if (HIDDEN.some(h => name === h || name.startsWith(h))) {
-          obj.visible = false;
-          if ((obj as THREE.Mesh).isMesh) (obj as THREE.Mesh).raycast = () => { };
-        }
-      });
-
-      // ── Index nodes by name ──
-      const byName: Record<string, THREE.Object3D> = {};
-      root.traverse((obj) => { byName[obj.name] = obj; });
-      console.log('GLB nodes:', Object.keys(byName).filter(n => n.startsWith('Joint') || n.startsWith('Blade')));
-
-      // ── Bind to the NEW joint hierarchy ──
-      const zLift = byName['Joint_ZLift'] as THREE.Object3D;
-      const turret = byName['Joint_Rot'] as THREE.Group;        // yaw (Y)
-      const shoulder = byName['Joint_Shoulder'] as THREE.Group;        // pitch (Z)
-      const elbow = byName['Joint_Elbow'] as THREE.Group;        // pitch (Z) — at +X 0.355 from shoulder
-      const foreArm = byName['Joint_Forearm'] as THREE.Group;        // pitch (Z)
-      const wrist = byName['Joint_Wrist'] as THREE.Group;        // pitch (Z) — at +X 0.305 from elbow
-      const gripper = (byName['Joint_Wrist'] ?? byName['Blade_Mount']) as THREE.Group;
-      // Blade tip lives ~0.335 along +X from the wrist (per Joint_Wrist children).
-      const fork = byName['Blade_Mount'] as THREE.Object3D ?? gripper;
-
-      if (!turret || !shoulder || !elbow || !wrist) {
-        console.error('GLB binding failed — joint nodes not found. Got:',
-          { turret: !!turret, shoulder: !!shoulder, elbow: !!elbow, wrist: !!wrist });
-        return;
-      }
-
-      // ── Status LED ──
-      const statusPL = new THREE.PointLight(ledColor, 1.6, 10);
-      statusPL.position.set(0, 2.0, 0);
-      root.add(statusPL);
-
-      // ── Rest-pose offsets used by IK (from GLB inspection, multiplied by scale) ──
-      // shoulder→elbow distance along X
-      const L1 = 0.355 * scale;
-      // elbow→wrist distance along X
-      const L2 = 0.305 * scale;
-      // wrist→blade-tip distance along X (Joint_Wrist x=0.335 to its children blade meshes)
-      const L3 = 0.335 * scale;
-      // Shoulder Y position above the rail
-      const SHOULDER_Y = (0.93 + 0.46) * scale;   // Joint_ZLift + Joint_Rot offsets
-
-      // Save state for animations / restoration
-      root.userData.vacuumEngaged = false;
-      root.userData.bladeFlash = 0;        // for visual "engaged" pulse
-      root.userData._ikYaw = 0;
-      root.userData.L1 = L1;
-      root.userData.L2 = L2;
-      root.userData.L3 = L3;
-      root.userData.SHOULDER_Y = SHOULDER_Y;
-
-      // Reusable temp objects
-      const axisY = new THREE.Vector3(0, 1, 0);
-      const axisZ = new THREE.Vector3(0, 0, 1);
-      const qTmp = new THREE.Quaternion();
-      const eTmp = new THREE.Euler();
-
-      // ── INVERSE KINEMATICS (closed-form 3R planar in the rotated X-Y plane) ──
-      //      function runIK(tgt: THREE.Vector3): void {
-      //   // ── 1. Turret yaw (unchanged — aim at target on the XZ plane) ──────────
-      //   const baseWP = new THREE.Vector3();
-      //   root.getWorldPosition(baseWP);
-      //   const dx = tgt.x - baseWP.x;
-      //   const dz = tgt.z - baseWP.z;
-      //   const rawYaw = Math.atan2(dx, dz);
-      //   const prev = root.userData._ikYaw as number;
-      //   let delta = rawYaw - prev;
-      //   while (delta >  Math.PI) delta -= 2 * Math.PI;
-      //   while (delta < -Math.PI) delta += 2 * Math.PI;
-      //   delta = Math.max(-Math.PI / 1.2, Math.min(Math.PI / 1.2, delta));
-      //   const newYaw = prev + delta;
-      //   root.userData._ikYaw = newYaw;
-      //   qTmp.setFromAxisAngle(axisY, newYaw);
-      //   turret.quaternion.slerp(qTmp, 0.22).normalize();
-
-      //   // ── 2. Target in turret-local frame ────────────────────────────────────
-      //   turret.updateWorldMatrix(true, false);
-      //   const localTgt = turret.worldToLocal(tgt.clone());
-
-      //   // After yaw, the planar reach is along +Z (because we rotated INTO the
-      //   // target). The vertical axis is Y. So treat the IK plane as (reachZ, Y).
-      //   // Important: use the absolute z because the turret might be slightly
-      //   // mis-aimed due to the slerp lag.
-      //   const reach = Math.abs(localTgt.z);
-
-      //   // Wrist target = wafer target minus the blade extension L3 along the
-      //   // arm's current outward direction. Since the wrist points +X in local
-      //   // shoulder frame, but after turret yaw the outward direction is +Z in
-      //   // turret-local frame, we subtract L3 from reach.
-      //   const wx = reach - L3;                          // horizontal distance to wrist
-      //   const wy = localTgt.y - SHOULDER_Y;             // vertical offset to wrist
-
-      //   let D = Math.hypot(wx, wy);
-
-      //   // Force the wrist target to sit strictly inside the bend annulus so the
-      //   // arm always bends. NEVER let D ≥ L1+L2 (which would force straight arm).
-      //   const MIN_BEND_ANGLE = 0.20;                    // ~11.5° minimum elbow bend
-      //   const Dmax_bent = Math.sqrt(
-      //     L1 * L1 + L2 * L2 - 2 * L1 * L2 * Math.cos(Math.PI - MIN_BEND_ANGLE)
-      //   );
-      //   const Dmin = Math.abs(L1 - L2) + 0.005;
-      //   D = Math.max(Dmin, Math.min(Dmax_bent, D));
-
-      //   // ── 3. Law-of-cosines (ELBOW-BACK branch) ──────────────────────────────
-      //   // Interior elbow angle (between L1 and L2)
-      //   const cosElbow = (L1 * L1 + L2 * L2 - D * D) / (2 * L1 * L2);
-      //   const elbowInner = Math.acos(Math.max(-1, Math.min(1, cosElbow)));
-
-      //   // Shoulder offset from straight-line-to-wrist
-      //   const cosShOff = (L1 * L1 + D * D - L2 * L2) / (2 * L1 * D);
-      //   const shOff = Math.acos(Math.max(-1, Math.min(1, cosShOff)));
-
-      //   // Angle from shoulder's +X (outward direction) to the wrist target.
-      //   // In the (wx, wy) plane:  +wx = outward, +wy = up.
-      //   const targetAng = Math.atan2(wy, wx);
-
-      //   // ── Elbow-BACK branch: forearm folds BACK toward the base, like a real
-      //   // wafer handler reaching around obstacles.
-      //   //   shoulderAngle = targetAng - shOff   (negative offset bends arm UP first)
-      //   //   elbowAngle    = π - elbowInner      (positive = forearm angled back)
-      //   const shoulderAngle = targetAng - shOff;
-      //   const elbowAngle    = Math.PI - elbowInner;
-
-      //   // ── 4. Wrist counter-rotation so the blade stays horizontal ────────────
-      //   // Sum of pitches in the chain must equal 0 for the blade to stay level.
-      //   // Chain: shoulder(+sA) → elbow(-eA) → forearm(0) → wrist(wA)
-      //   //   sA − eA + wA = 0   →   wA = eA − sA
-      //   const wristAngle = elbowAngle - shoulderAngle;
-
-      //   // ── 5. Apply with damped slerp ─────────────────────────────────────────
-      //   // Use larger blend (0.3) on shoulder/elbow so the bend is responsive,
-      //   // smaller (0.22) on wrist for stability.
-      //   qTmp.setFromAxisAngle(axisZ, shoulderAngle);
-      //   shoulder.quaternion.slerp(qTmp, 0.30).normalize();
-
-      //   qTmp.setFromAxisAngle(axisZ, -elbowAngle);   // negative = fold back
-      //   elbow.quaternion.slerp(qTmp, 0.30).normalize();
-
-      //   // Forearm stays identity (structural link in this rig)
-      //   foreArm.quaternion.slerp(new THREE.Quaternion(), 0.15).normalize();
-
-      //   qTmp.setFromAxisAngle(axisZ, wristAngle);
-      //   wrist.quaternion.slerp(qTmp, 0.22).normalize();
-      // }
-
-
-      // function runIK(tgt: THREE.Vector3): void {
-      //   // ── 1. Turret yaw — aim toward target on the XZ plane ─────────────────
-      //   const baseWP = new THREE.Vector3();
-      //   root.getWorldPosition(baseWP);
-      //   const dx = tgt.x - baseWP.x;
-      //   const dz = tgt.z - baseWP.z;
-
-      //   // Note: arm's outward direction in turret-local frame is +X.
-      //   // Standard yaw: atan2(dx, dz) aims local +Z; we want local +X. So use atan2(dz, dx) negated, OR rotate by +π/2.
-      //   // Easier: aim the arm's local +X by yaw = atan2(dz, dx)? No — let's stick with whichever
-      //   // axis the GLB actually extends along. Joint_Elbow translates +X 0.355 → arm extends +X.
-      //   // So we want yaw such that turret-local +X points at the target.
-      //   // World direction to target on XZ plane: (dx, dz).
-      //   // After yaw θ around Y, local +X maps to world (cos θ, 0, -sin θ).
-      //   // Setting that equal to normalized (dx, dz): cos θ = dx/r, -sin θ = dz/r  →  θ = atan2(-dz, dx).
-      //   const r2d = Math.hypot(dx, dz) || 1;
-      //   const rawYaw = Math.atan2(-dz, dx);
-
-      //   const prev = root.userData._ikYaw as number;
-      //   let delta = rawYaw - prev;
-      //   while (delta >  Math.PI) delta -= 2 * Math.PI;
-      //   while (delta < -Math.PI) delta += 2 * Math.PI;
-      //   const newYaw = prev + delta;
-      //   root.userData._ikYaw = newYaw;
-      //   qTmp.setFromAxisAngle(axisY, newYaw);
-      //   turret.quaternion.slerp(qTmp, 0.20).normalize();
-
-      //   // ── 2. Target in shoulder-local plane ──────────────────────────────────
-      //   // After the turret is yawed, the arm reaches outward along +X in turret-local space.
-      //   // The horizontal reach we need to solve for is the distance from the shoulder
-      //   // pivot to the (projected) target on the horizontal plane.
-      //   // We use world distance directly to avoid issues with slerp lag:
-      //   const reachHoriz = r2d;                          // horizontal distance shoulder→target
-      //   const verticalOff = tgt.y - (baseWP.y + SHOULDER_Y);
-
-      //   // The blade tip sits L3 beyond the wrist along +X. So the WRIST must reach
-      //   // a point that is L3 closer to the shoulder than the target:
-      //   const wx = reachHoriz - L3;
-      //   const wy = verticalOff;
-
-      //   // ── 3. Solve 2-link IK in the (wx, wy) plane ──────────────────────────
-      //   let D = Math.hypot(wx, wy);
-
-      //   // Reach limits — keep the arm slightly bent at extremes to avoid singularity,
-      //   // and prevent inversion when target is too close.
-      //   const Dmax = (L1 + L2) * 1.4;                   // 97% of max reach
-      //   const Dmin = Math.abs(L1 - L2) + 0.02;
-      //   D = Math.max(Dmin, Math.min(Dmax, D));
-
-      //   // Law of cosines:
-      //   //   cos(elbow_interior) = (L1² + L2² - D²) / (2·L1·L2)
-      //   // When D = Dmax, elbow_interior ≈ 0 (arm nearly straight) — fine.
-      //   // When D = Dmin, elbow_interior ≈ π (arm fully folded) — also fine.
-      //   const cosElbow = (L1 * L1 + L2 * L2 - D * D) / (2 * L1 * L2);
-      //   const elbowInterior = Math.acos(Math.max(-1, Math.min(1, cosElbow)));
-
-      //   // Angle from shoulder to wrist target, measured from local +X (outward).
-      //   // wx = outward, wy = up.  atan2(wy, wx) ∈ (-π, π].
-      //   const wristDirAng = Math.atan2(wy, wx);
-
-      //   // Offset between upper-arm direction and shoulder→wrist line:
-      //   //   cos(offset) = (L1² + D² - L2²) / (2·L1·D)
-      //   const cosShOff = (L1 * L1 + D * D - L2 * L2) / (2 * L1 * D);
-      //   const shOff = Math.acos(Math.max(-1, Math.min(1, cosShOff)));
-
-      //   // ── 4. ELBOW-UP branch (upper arm goes ABOVE the line to wrist) ───────
-      //   // This is the natural SCARA-style "shoulder lifts, elbow droops back down"
-      //   // silhouette for an outward-reaching horizontal arm.
-      //   //
-      //   //   shoulderAngle =  wristDirAng + shOff      (rotates upper arm UP)
-      //   //   elbowAngle    = -(π - elbowInterior)      (forearm rotates DOWN to reach wrist)
-      //   //
-      //   // Sign convention: positive Z-rotation rotates local +X toward local +Y (up).
-      //   const shoulderAngle = wristDirAng + shOff;
-      //   const elbowAngle    = -(Math.PI - elbowInterior);
-
-      //   // ── 5. Wrist keeps blade level ────────────────────────────────────────
-      //   // Chain pitches sum to zero so blade points horizontally:
-      //   //   shoulderAngle + elbowAngle + wristAngle = 0
-      //   const wristAngle = -(shoulderAngle + elbowAngle);
-
-      //   // ── 6. Apply ──────────────────────────────────────────────────────────
-      //   qTmp.setFromAxisAngle(axisZ, shoulderAngle);
-      //   shoulder.quaternion.slerp(qTmp, 0.22).normalize();
-
-      //   qTmp.setFromAxisAngle(axisZ, elbowAngle);
-      //   elbow.quaternion.slerp(qTmp, 0.22).normalize();
-
-      //   // Forearm is a rigid link in this rig
-      //   foreArm.quaternion.slerp(new THREE.Quaternion(), 0.15).normalize();
-
-      //   qTmp.setFromAxisAngle(axisZ, wristAngle);
-      //   wrist.quaternion.slerp(qTmp, 0.22).normalize();
-      // }
-
-
-      // function runIK(tgt: THREE.Vector3): void {
-      //   // ── 1. Turret yaw ──
-      //   const baseWP = new THREE.Vector3();
-      //   root.getWorldPosition(baseWP);
-      //   const dx = tgt.x - baseWP.x;
-      //   const dz = tgt.z - baseWP.z;
-      //   const r2d = Math.hypot(dx, dz) || 1;
-      //   const rawYaw = Math.atan2(-dz, dx);
-
-      //   const prev = root.userData._ikYaw as number;
-      //   let delta = rawYaw - prev;
-      //   while (delta >  Math.PI) delta -= 2 * Math.PI;
-      //   while (delta < -Math.PI) delta += 2 * Math.PI;
-      //   const newYaw = prev + delta;
-      //   root.userData._ikYaw = newYaw;
-      //   qTmp.setFromAxisAngle(axisY, newYaw);
-      //   turret.quaternion.slerp(qTmp, 0.20).normalize();
-
-      //   // ── 2. 2-link IK in shoulder-local plane ──
-      //   const reachHoriz = Math.max(r2d, 0.1);  // tiny minimum to avoid singularity
-      //   const verticalOff = tgt.y - (baseWP.y + SHOULDER_Y);
-
-      //   const wx = reachHoriz - L3;
-      //   const wy = verticalOff;
-
-      //   let D = Math.hypot(wx, wy);
-      //   const Dmax = (L1 + L2) * 0.98;
-      //   const Dmin = Math.abs(L1 - L2) + 0.02;
-      //   D = Math.max(Dmin, Math.min(Dmax, D));
-
-      //   const cosElbow = (L1 * L1 + L2 * L2 - D * D) / (2 * L1 * L2);
-      //   const elbowInterior = Math.acos(Math.max(-1, Math.min(1, cosElbow)));
-
-      //   const wristDirAng = Math.atan2(wy, wx);
-      //   const cosShOff = (L1 * L1 + D * D - L2 * L2) / (2 * L1 * D);
-      //   const shOff = Math.acos(Math.max(-1, Math.min(1, cosShOff)));
-
-      //   // ── ELBOW-UP branch ──
-      //   let shoulderAngle = wristDirAng + shOff;
-      //   let elbowAngle    = -(Math.PI - elbowInterior);
-
-      //   // ── Joint limits (loose) ──
-      //   shoulderAngle = Math.max(-0.4, Math.min(Math.PI * 0.7, shoulderAngle));
-      //   elbowAngle    = Math.max(-Math.PI * 0.95, Math.min(-0.03, elbowAngle));
-
-      //   let wristAngle = -(shoulderAngle + elbowAngle);
-      //   wristAngle = Math.max(-Math.PI * 0.8, Math.min(Math.PI * 0.8, wristAngle));
-
-      //   qTmp.setFromAxisAngle(axisZ, shoulderAngle);
-      //   shoulder.quaternion.slerp(qTmp, 0.22).normalize();
-
-      //   qTmp.setFromAxisAngle(axisZ, elbowAngle);
-      //   elbow.quaternion.slerp(qTmp, 0.22).normalize();
-
-      //   foreArm.quaternion.slerp(new THREE.Quaternion(), 0.15).normalize();
-
-      //   qTmp.setFromAxisAngle(axisZ, wristAngle);
-      //   wrist.quaternion.slerp(qTmp, 0.22).normalize();
-      // }
-      // function runIK(tgt: THREE.Vector3): void {
-      //   // ── FLOOR CLEARANCE GUARD ──────────────────────────────────────
-      //   // Clamp target Y so the end-effector never descends below a safe
-      //   // clearance height above the module tops (~3.7 units from floor).
-      //   const MIN_SAFE_Y = 3.7;          // ← tune: MODULE_BASE_Y + H + margin
-      //   const clampedTgt = tgt.clone();
-      //   clampedTgt.y = Math.max(tgt.y, MIN_SAFE_Y);
-
-      //   // ── 1. Turret yaw ──
-      //   const baseWP = new THREE.Vector3();
-      //   root.getWorldPosition(baseWP);
-      //   const dx = clampedTgt.x - baseWP.x;
-      //   const dz = clampedTgt.z - baseWP.z;
-      //   const r2d = Math.hypot(dx, dz) || 1;
-      //   const rawYaw = Math.atan2(-dz, dx);
-
-      //   const prev = root.userData._ikYaw as number;
-      //   let delta = rawYaw - prev;
-      //   while (delta >  Math.PI) delta -= 2 * Math.PI;
-      //   while (delta < -Math.PI) delta += 2 * Math.PI;
-      //   const newYaw = prev + delta;
-      //   root.userData._ikYaw = newYaw;
-      //   qTmp.setFromAxisAngle(axisY, newYaw);
-      //   turret.quaternion.slerp(qTmp, 0.20).normalize();
-
-      //   // ── 2. 2-link IK in shoulder-local plane ──
-      //   const reachHoriz = Math.max(r2d, 0.1);
-      //   const verticalOff = clampedTgt.y - (baseWP.y + SHOULDER_Y);  // ← use clamped Y
-
-      //   const wx = reachHoriz - L3;
-      //   const wy = verticalOff;
-
-      //   let D = Math.hypot(wx, wy);
-      //   const Dmax = (L1 + L2) * 0.98;
-      //   const Dmin = Math.abs(L1 - L2) + 0.02;
-      //   D = Math.max(Dmin, Math.min(Dmax, D));
-
-      //   const cosElbow = (L1 * L1 + L2 * L2 - D * D) / (2 * L1 * L2);
-      //   const elbowInterior = Math.acos(Math.max(-1, Math.min(1, cosElbow)));
-
-      //   const wristDirAng = Math.atan2(wy, wx);
-      //   const cosShOff = (L1 * L1 + D * D - L2 * L2) / (2 * L1 * D);
-      //   const shOff = Math.acos(Math.max(-1, Math.min(1, cosShOff)));
-
-      //   // ── ELBOW-UP branch ──
-      //   let shoulderAngle = wristDirAng + shOff;
-      //   let elbowAngle    = -(Math.PI - elbowInterior);
-
-      //   // ── Joint limits — tightened to prevent floor crash ──
-      //   // FIX: raised shoulder min from -0.4 → +0.05 so arm never dips below horizon
-      //   shoulderAngle = Math.max(0.05, Math.min(Math.PI * 0.7, shoulderAngle));
-      //   // FIX: tightened elbow upper bound from -0.03 → -0.10 prevents hyper-extension low
-      //   elbowAngle    = Math.max(-Math.PI * 0.95, Math.min(-0.10, elbowAngle));
-
-      //   // ── Wrist compensation with clearance clamp ──
-      //   let wristAngle = -(shoulderAngle + elbowAngle);
-      //   // FIX: clamp wrist so it can't pitch the end-effector downward past level
-      //   wristAngle = Math.max(-Math.PI * 0.5, Math.min(Math.PI * 0.8, wristAngle));
-
-      //   qTmp.setFromAxisAngle(axisZ, shoulderAngle);
-      //   shoulder.quaternion.slerp(qTmp, 0.22).normalize();
-
-      //   qTmp.setFromAxisAngle(axisZ, elbowAngle);
-      //   elbow.quaternion.slerp(qTmp, 0.22).normalize();
-
-      //   foreArm.quaternion.slerp(new THREE.Quaternion(), 0.15).normalize();
-
-      //   qTmp.setFromAxisAngle(axisZ, wristAngle);
-      //   wrist.quaternion.slerp(qTmp, 0.22).normalize();
-      // }
-
-
-      // ── Hydraulic Lift Cylinder — global state ──
-      let liftCylinder: THREE.Object3D | null = null;   // assigned when robot is built
-      let currentLiftHeight = 0.0;
-
-      function setLiftHeight(targetHeight: number, speed = 0.25) {
-        currentLiftHeight = THREE.MathUtils.lerp(currentLiftHeight, targetHeight, speed);
-        if (liftCylinder) {
-          // Scale the cylinder along Y and shift its base position
-          liftCylinder.scale.y = Math.max(0.3, 1 + currentLiftHeight * 2.5);
-          liftCylinder.position.y = currentLiftHeight * 0.8;
-        }
-      }
-
-      function clamp(x: number, min: number, max: number): number {
-        return Math.max(min, Math.min(max, x));
-      }
-
-      function runIK(tgt: THREE.Vector3, options: {
-  isScanner?: boolean;
-  isHMDS?: boolean;
-  isDIRinse?: boolean;
-  isHardBake?: boolean;     // ← NEW
-  isTravel?: boolean;
-  placeHeightOffset?: number;
-  approachHeight?: number;
-  safetyMargin?: number;
-} = {}): void {
-  const {
-    isScanner = false,
-    isHMDS = false,
-    isDIRinse = false,
-    isHardBake = false,     // ← NEW
-    isTravel = false,
-    placeHeightOffset = 0.0,
-    approachHeight = 0.12,
-    safetyMargin = 0.08,
-  } = options;
-
-        // ══════════════════════════════════════════════════════════════════════
-        // 0. SANITY CHECK on target — prevent NaN/Infinity from breaking IK
-        // ══════════════════════════════════════════════════════════════════════
-        if (!Number.isFinite(tgt.x) || !Number.isFinite(tgt.y) || !Number.isFinite(tgt.z)) {
-          console.warn('[IK] Invalid target — skipping', tgt);
-          return;
-        }
-
-        // ══════════════════════════════════════════════════════════════════════
-        // 1. LIFT HEIGHT — column rises higher for tall modules (scanner especially)
-        // ══════════════════════════════════════════════════════════════════════
-       let requiredLift = 0.0;
-  if (isScanner) {
-    requiredLift = 0.88;
-  } else if (isHMDS) {
-    requiredLift = 0.28;
-  } else if (isDIRinse) {
-    requiredLift = 0.22;
-  } else if (isHardBake) {
-    requiredLift = 0.32;     // ← NEW — tune this against the box wall height in your screenshot
-  }
-
-        // ── Faster column rise for scanner (smaller smoothing factor = quicker) ──
-        const liftSmoothing = isScanner ? 0.25 : 0.18;
-        setLiftHeight(requiredLift, liftSmoothing);
-
-        // ══════════════════════════════════════════════════════════════════════
-        // 2. TURRET YAW — with safe shortest-path resolution
-        // ══════════════════════════════════════════════════════════════════════
-        const baseWP = new THREE.Vector3();
-        root.getWorldPosition(baseWP);
-        const dx = tgt.x - baseWP.x;
-        const dz = tgt.z - baseWP.z;
-        const r2d = Math.hypot(dx, dz);
-
-        // ── CRITICAL: Avoid yaw singularity when target is directly above base ──
-        // For HMDS especially, the wafer can be very close to the base,
-        // causing dx/dz to be near-zero and atan2 to flip wildly.
-        // Implement hysteresis + rate-limited logging to avoid console spam.
-        const closeThresh = isHMDS ? 0.15 : 0.12;
-        const reopenThresh = closeThresh + 0.04;
-        const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
-        const lastWarn = (root.userData._ikLastCloseWarn as number) ?? 0;
-        const locked = !!root.userData._ikYawLocked;
-
-        if (r2d < closeThresh) {
-          if (!locked) {
-            root.userData._ikYawLocked = true;
-            root.userData._ikLastCloseWarn = now;
-            console.warn('[IK] Target too close to base — yaw locked');
-          } else if (now - lastWarn > 2000) {
-            // periodic reminder if still stuck close for a while
-            root.userData._ikLastCloseWarn = now;
-            console.warn('[IK] Target too close to base — yaw still locked');
-          }
-          // keep previous yaw, skip update
-        } else {
-          // If we were locked and target moved away past reopen threshold, unlock
-          if (locked && r2d > reopenThresh) {
-            root.userData._ikYawLocked = false;
-            // log unlock once
-            console.info('[IK] Target moved away from base — yaw unlocked');
-          }
-
-          const rootYaw = EFEM_RIGHT_SIDE_YAW;
-          const rawYaw = Math.atan2(-dz, dx) - rootYaw;
-          const prev = (root.userData._ikYaw as number) ?? rawYaw;
-          let delta = rawYaw - prev;
-
-          // ── Normalize delta to [-π, π]
-          delta = Math.atan2(Math.sin(delta), Math.cos(delta));
-
-          // ── HMDS extra safety: limit rotation speed when going through tight angles
-          let yawStepLimit = Math.PI;
-          if (isHMDS) yawStepLimit = Math.PI * 0.6;
-          if (Math.abs(delta) > yawStepLimit) delta = Math.sign(delta) * yawStepLimit;
-
-          const newYaw = prev + delta;
-          root.userData._ikYaw = newYaw;
-          qTmp.setFromAxisAngle(axisY, newYaw);
-
-          // Slower slerp for HMDS or travel to prevent overshoot
-          const yawSlerpRate = isHMDS || isTravel ? 0.12 : 0.18;
-          turret.quaternion.slerp(qTmp, yawSlerpRate).normalize();
-        }
-
-        // ══════════════════════════════════════════════════════════════════════
-        // 3. ARM IK — 2-link in shoulder-local plane with crash protection
-        // ══════════════════════════════════════════════════════════════════════
-        const shoulderBaseY = baseWP.y + SHOULDER_Y + currentLiftHeight * 0.9;
-        let finalTargetY = tgt.y + placeHeightOffset;
-
-        // ── HMDS gets extra approach height to clear walls ──
-        if (isHMDS) {
-          finalTargetY += 0.05;       // raise approach by 5cm
-        }
-        if (isTravel) {
-          const SAFE_TRAVEL_Y = WAFER_TRANSFER_Y + 1.2;   // keep travel motion well above all modules
-          finalTargetY = Math.max(finalTargetY, SAFE_TRAVEL_Y);
-        }
-
-        const verticalOff = finalTargetY - shoulderBaseY + Math.max(safetyMargin, isTravel ? 0.12 : 0.0);
-        const reachHoriz = Math.max(r2d, 0.15);   // bumped min from 0.12 to 0.15
-
-        const wx = reachHoriz - L3;
-        const wy = verticalOff;
-
-        // ── CRITICAL: Validate wx, wy before computing D ──
-        if (!Number.isFinite(wx) || !Number.isFinite(wy)) {
-          console.warn('[IK] Invalid wrist target — aborting arm IK');
-          return;
-        }
-
-        let D = Math.hypot(wx, wy);
-
-        // ── Reach clamping with HMDS-specific tighter bounds ──
-        const Dmax = (L1 + L2) * (isHMDS ? 0.92 : 0.96);   // ← Tighter for HMDS
-        const Dmin = Math.abs(L1 - L2) + (isHMDS ? 0.08 : 0.04);
-        D = Math.max(Dmin, Math.min(Dmax, D));
-
-        // ── CRITICAL: Guard against D being zero or invalid ──
-        if (D < 0.001 || !Number.isFinite(D)) {
-          console.warn('[IK] Degenerate reach — aborting');
-          return;
-        }
-
-        // Law of Cosines with clamping (prevents NaN from floating point error)
-        const cosElbow = clamp((L1 * L1 + L2 * L2 - D * D) / (2 * L1 * L2), -1, 1);
-        const elbowInterior = Math.acos(cosElbow);
-
-        const wristDirAng = Math.atan2(wy, wx);
-        const cosShOff = clamp((L1 * L1 + D * D - L2 * L2) / (2 * L1 * D), -1, 1);
-        const shOff = Math.acos(cosShOff);
-
-        // ── CRITICAL: Validate computed angles ──
-        if (!Number.isFinite(elbowInterior) || !Number.isFinite(wristDirAng) || !Number.isFinite(shOff)) {
-          console.warn('[IK] NaN in IK computation — aborting');
-          return;
-        }
-
-        // ── Elbow-up branch ──
-        let shoulderAngle = wristDirAng + shOff;
-        let elbowAngle = -(Math.PI - elbowInterior);
-
-        // ── HMDS-specific joint limits (slightly more conservative) ──
-        if (isHMDS) {
-          shoulderAngle = clamp(shoulderAngle, -0.50, Math.PI * 0.60);   // tighter shoulder range
-          elbowAngle = clamp(elbowAngle, -Math.PI * 0.80, -0.15);  // tighter elbow range
-        } else if (isScanner) {
-          // Scanner needs wide upward shoulder range to reach raised slot
-          shoulderAngle = clamp(shoulderAngle, -0.30, Math.PI * 0.85);   // ← higher upper limit
-          elbowAngle = clamp(elbowAngle, -Math.PI * 0.90, 0.05);   // ← allows straighter arm
-        } else {
-          shoulderAngle = clamp(shoulderAngle, isTravel ? 0.10 : -0.65, Math.PI * 0.70);
-          elbowAngle = clamp(elbowAngle, -Math.PI * 0.85, -0.10);
-        }
-
-        let wristAngle = -(shoulderAngle + elbowAngle);
-        wristAngle = clamp(wristAngle, -Math.PI * 0.80, Math.PI * 0.80);
-
-        // ══════════════════════════════════════════════════════════════════════
-        // 4. APPLY ROTATIONS — with HMDS slower slerp to prevent crash
-        // ══════════════════════════════════════════════════════════════════════
-        const armSlerpRate = isHMDS || isTravel ? 0.14 : 0.20;   // slower for HMDS/travel = smoother
-
-        qTmp.setFromAxisAngle(axisZ, shoulderAngle);
-        shoulder.quaternion.slerp(qTmp, armSlerpRate).normalize();
-
-        qTmp.setFromAxisAngle(axisZ, elbowAngle);
-        elbow.quaternion.slerp(qTmp, armSlerpRate).normalize();
-
-        foreArm.quaternion.slerp(new THREE.Quaternion(), armSlerpRate).normalize();
-
-        qTmp.setFromAxisAngle(axisZ, wristAngle);
-        wrist.quaternion.slerp(qTmp, armSlerpRate).normalize();
-      }
-
-
-
-
-      function getJoints(): JointData {
-        eTmp.setFromQuaternion(turret.quaternion, "YXZ");
-        const baseA = eTmp.y;
-        eTmp.setFromQuaternion(shoulder.quaternion, "XYZ");
-        const shoulderA = eTmp.z;
-        eTmp.setFromQuaternion(elbow.quaternion, "XYZ");
-        const elbowA = eTmp.z;
-        eTmp.setFromQuaternion(wrist.quaternion, "XYZ");
-        const wristA = eTmp.z;
-        return {
-          base: { c: baseA },
-          shoulder: { c: shoulderA },
-          elbow: { c: elbowA },
-          wrist: { c: wristA },
-        };
-      }
-
-      console.log('=== NEW ROBOT BOUND ===');
-      console.log('  turret  :', turret.name);
-      console.log('  shoulder:', shoulder.name);
-      console.log('  elbow   :', elbow.name);
-      console.log('  foreArm :', foreArm.name);
-      console.log('  wrist   :', wrist.name);
-      console.log('  blade   :', fork.name);
-      console.log(`  L1=${L1.toFixed(3)} L2=${L2.toFixed(3)} L3=${L3.toFixed(3)} SH_Y=${SHOULDER_Y.toFixed(3)}`);
-
-      onReady({
-        group: root,
-        turret,
-        shoulder,
-        upperArm: shoulder,           // alias — no separate upperArm in this rig
-        elbow,
-        foreArm,
-        wrist,
-        gripper,
-        fork,
-        statusPL,
-        basePos: basePos.clone(),
-        runIK,
-        getJoints,
-        worldPos: () => {
-          const v = new THREE.Vector3();
-          fork.getWorldPosition(v);
-          return v;
-        },
-      });
-    },
-    (p: any) => {
-      if (p.total > 0) console.log('GLB loading:', Math.round(p.loaded / p.total * 100) + '%');
-    },
-    (err: any) => console.error('GLB FAILED:', err)
-  );
-}
+// ===== GLB-REMOVED (buildRobotGLB - /roboticarm.glb EFEM robot) - re-wire the new module here. See GLB_WIRING_CONTRACT.md =====
+// function buildRobotGLB(
+//   scene: THREE.Scene,
+//   basePos: THREE.Vector3,
+//   ledColor = 0x00ff88,
+//   scale = 0.35,
+//   onReady: (robot: RobotObject) => void,
+//   baseYaw = EFEM_RIGHT_SIDE_YAW
+// ): void {
+//   const loader = new GLTFLoader();
+//   loader.load(
+//     '/roboticarm.glb',
+//     (gltf: any) => {
+//       const root = gltf.scene as THREE.Group;
+//       root.scale.setScalar(scale);
+//       // Mount the robot rotated toward its wafer-rack. IK below compensates
+//       // for this local base yaw when aiming at world targets.
+//       root.rotation.y = baseYaw;
+//       scene.add(root);
+// 
+//       // Validate transforms
+//       root.traverse((obj) => {
+//         if (obj instanceof THREE.Group || (obj as THREE.Mesh).isMesh) {
+//           obj.quaternion.normalize();
+//         }
+//       });
+// 
+//       // Snap to floor
+//       const box = new THREE.Box3().setFromObject(root);
+//       const FLOOR_Y = 0.3;
+//       root.position.set(basePos.x, FLOOR_Y - box.min.y, basePos.z);
+// 
+//       // Shadows + LEDs
+//       root.traverse((obj: THREE.Object3D) => {
+//         if ((obj as THREE.Mesh).isMesh) {
+//           obj.castShadow = true;
+//           obj.receiveShadow = true;
+//           const mesh = obj as THREE.Mesh;
+//           const mat = mesh.material as THREE.MeshStandardMaterial;
+//           if (mat && mat.name && (mat.name.includes('LED') || mat.name.includes('emit'))) {
+//             mat.emissive = new THREE.Color(ledColor);
+//             mat.emissiveIntensity = 2.5;
+//           }
+//         }
+//       });
+// 
+//       // Hide rigging helpers from old file (left in just in case GLB has them)
+//       const HIDDEN = ['BezierCircle', 'IK', 'CameraTarget', 'Curve', 'Empty', 'Pole'];
+//       root.traverse((obj) => {
+//         const name = obj.name || '';
+//         if (HIDDEN.some(h => name === h || name.startsWith(h))) {
+//           obj.visible = false;
+//           if ((obj as THREE.Mesh).isMesh) (obj as THREE.Mesh).raycast = () => { };
+//         }
+//       });
+// 
+//       // ── Index nodes by name ──
+//       const byName: Record<string, THREE.Object3D> = {};
+//       root.traverse((obj) => { byName[obj.name] = obj; });
+//       console.log('GLB nodes:', Object.keys(byName).filter(n => n.startsWith('Joint') || n.startsWith('Blade')));
+// 
+//       // ── Bind to the NEW joint hierarchy ──
+//       const zLift = byName['Joint_ZLift'] as THREE.Object3D;
+//       const turret = byName['Joint_Rot'] as THREE.Group;        // yaw (Y)
+//       const shoulder = byName['Joint_Shoulder'] as THREE.Group;        // pitch (Z)
+//       const elbow = byName['Joint_Elbow'] as THREE.Group;        // pitch (Z) — at +X 0.355 from shoulder
+//       const foreArm = byName['Joint_Forearm'] as THREE.Group;        // pitch (Z)
+//       const wrist = byName['Joint_Wrist'] as THREE.Group;        // pitch (Z) — at +X 0.305 from elbow
+//       const gripper = (byName['Joint_Wrist'] ?? byName['Blade_Mount']) as THREE.Group;
+//       // Blade tip lives ~0.335 along +X from the wrist (per Joint_Wrist children).
+//       const fork = byName['Blade_Mount'] as THREE.Object3D ?? gripper;
+// 
+//       if (!turret || !shoulder || !elbow || !wrist) {
+//         console.error('GLB binding failed — joint nodes not found. Got:',
+//           { turret: !!turret, shoulder: !!shoulder, elbow: !!elbow, wrist: !!wrist });
+//         return;
+//       }
+// 
+//       // ── Status LED ──
+//       const statusPL = new THREE.PointLight(ledColor, 1.6, 10);
+//       statusPL.position.set(0, 2.0, 0);
+//       root.add(statusPL);
+// 
+//       // ── Rest-pose offsets used by IK (from GLB inspection, multiplied by scale) ──
+//       // shoulder→elbow distance along X
+//       const L1 = 0.355 * scale;
+//       // elbow→wrist distance along X
+//       const L2 = 0.305 * scale;
+//       // wrist→blade-tip distance along X (Joint_Wrist x=0.335 to its children blade meshes)
+//       const L3 = 0.335 * scale;
+//       // Shoulder Y position above the rail
+//       const SHOULDER_Y = (0.93 + 0.46) * scale;   // Joint_ZLift + Joint_Rot offsets
+// 
+//       // Save state for animations / restoration
+//       root.userData.vacuumEngaged = false;
+//       root.userData.bladeFlash = 0;        // for visual "engaged" pulse
+//       root.userData._ikYaw = 0;
+//       root.userData.L1 = L1;
+//       root.userData.L2 = L2;
+//       root.userData.L3 = L3;
+//       root.userData.SHOULDER_Y = SHOULDER_Y;
+// 
+//       // Reusable temp objects
+//       const axisY = new THREE.Vector3(0, 1, 0);
+//       const axisZ = new THREE.Vector3(0, 0, 1);
+//       const qTmp = new THREE.Quaternion();
+//       const eTmp = new THREE.Euler();
+// 
+//       // ── INVERSE KINEMATICS (closed-form 3R planar in the rotated X-Y plane) ──
+//       //      function runIK(tgt: THREE.Vector3): void {
+//       //   // ── 1. Turret yaw (unchanged — aim at target on the XZ plane) ──────────
+//       //   const baseWP = new THREE.Vector3();
+//       //   root.getWorldPosition(baseWP);
+//       //   const dx = tgt.x - baseWP.x;
+//       //   const dz = tgt.z - baseWP.z;
+//       //   const rawYaw = Math.atan2(dx, dz);
+//       //   const prev = root.userData._ikYaw as number;
+//       //   let delta = rawYaw - prev;
+//       //   while (delta >  Math.PI) delta -= 2 * Math.PI;
+//       //   while (delta < -Math.PI) delta += 2 * Math.PI;
+//       //   delta = Math.max(-Math.PI / 1.2, Math.min(Math.PI / 1.2, delta));
+//       //   const newYaw = prev + delta;
+//       //   root.userData._ikYaw = newYaw;
+//       //   qTmp.setFromAxisAngle(axisY, newYaw);
+//       //   turret.quaternion.slerp(qTmp, 0.22).normalize();
+// 
+//       //   // ── 2. Target in turret-local frame ────────────────────────────────────
+//       //   turret.updateWorldMatrix(true, false);
+//       //   const localTgt = turret.worldToLocal(tgt.clone());
+// 
+//       //   // After yaw, the planar reach is along +Z (because we rotated INTO the
+//       //   // target). The vertical axis is Y. So treat the IK plane as (reachZ, Y).
+//       //   // Important: use the absolute z because the turret might be slightly
+//       //   // mis-aimed due to the slerp lag.
+//       //   const reach = Math.abs(localTgt.z);
+// 
+//       //   // Wrist target = wafer target minus the blade extension L3 along the
+//       //   // arm's current outward direction. Since the wrist points +X in local
+//       //   // shoulder frame, but after turret yaw the outward direction is +Z in
+//       //   // turret-local frame, we subtract L3 from reach.
+//       //   const wx = reach - L3;                          // horizontal distance to wrist
+//       //   const wy = localTgt.y - SHOULDER_Y;             // vertical offset to wrist
+// 
+//       //   let D = Math.hypot(wx, wy);
+// 
+//       //   // Force the wrist target to sit strictly inside the bend annulus so the
+//       //   // arm always bends. NEVER let D ≥ L1+L2 (which would force straight arm).
+//       //   const MIN_BEND_ANGLE = 0.20;                    // ~11.5° minimum elbow bend
+//       //   const Dmax_bent = Math.sqrt(
+//       //     L1 * L1 + L2 * L2 - 2 * L1 * L2 * Math.cos(Math.PI - MIN_BEND_ANGLE)
+//       //   );
+//       //   const Dmin = Math.abs(L1 - L2) + 0.005;
+//       //   D = Math.max(Dmin, Math.min(Dmax_bent, D));
+// 
+//       //   // ── 3. Law-of-cosines (ELBOW-BACK branch) ──────────────────────────────
+//       //   // Interior elbow angle (between L1 and L2)
+//       //   const cosElbow = (L1 * L1 + L2 * L2 - D * D) / (2 * L1 * L2);
+//       //   const elbowInner = Math.acos(Math.max(-1, Math.min(1, cosElbow)));
+// 
+//       //   // Shoulder offset from straight-line-to-wrist
+//       //   const cosShOff = (L1 * L1 + D * D - L2 * L2) / (2 * L1 * D);
+//       //   const shOff = Math.acos(Math.max(-1, Math.min(1, cosShOff)));
+// 
+//       //   // Angle from shoulder's +X (outward direction) to the wrist target.
+//       //   // In the (wx, wy) plane:  +wx = outward, +wy = up.
+//       //   const targetAng = Math.atan2(wy, wx);
+// 
+//       //   // ── Elbow-BACK branch: forearm folds BACK toward the base, like a real
+//       //   // wafer handler reaching around obstacles.
+//       //   //   shoulderAngle = targetAng - shOff   (negative offset bends arm UP first)
+//       //   //   elbowAngle    = π - elbowInner      (positive = forearm angled back)
+//       //   const shoulderAngle = targetAng - shOff;
+//       //   const elbowAngle    = Math.PI - elbowInner;
+// 
+//       //   // ── 4. Wrist counter-rotation so the blade stays horizontal ────────────
+//       //   // Sum of pitches in the chain must equal 0 for the blade to stay level.
+//       //   // Chain: shoulder(+sA) → elbow(-eA) → forearm(0) → wrist(wA)
+//       //   //   sA − eA + wA = 0   →   wA = eA − sA
+//       //   const wristAngle = elbowAngle - shoulderAngle;
+// 
+//       //   // ── 5. Apply with damped slerp ─────────────────────────────────────────
+//       //   // Use larger blend (0.3) on shoulder/elbow so the bend is responsive,
+//       //   // smaller (0.22) on wrist for stability.
+//       //   qTmp.setFromAxisAngle(axisZ, shoulderAngle);
+//       //   shoulder.quaternion.slerp(qTmp, 0.30).normalize();
+// 
+//       //   qTmp.setFromAxisAngle(axisZ, -elbowAngle);   // negative = fold back
+//       //   elbow.quaternion.slerp(qTmp, 0.30).normalize();
+// 
+//       //   // Forearm stays identity (structural link in this rig)
+//       //   foreArm.quaternion.slerp(new THREE.Quaternion(), 0.15).normalize();
+// 
+//       //   qTmp.setFromAxisAngle(axisZ, wristAngle);
+//       //   wrist.quaternion.slerp(qTmp, 0.22).normalize();
+//       // }
+// 
+// 
+//       // function runIK(tgt: THREE.Vector3): void {
+//       //   // ── 1. Turret yaw — aim toward target on the XZ plane ─────────────────
+//       //   const baseWP = new THREE.Vector3();
+//       //   root.getWorldPosition(baseWP);
+//       //   const dx = tgt.x - baseWP.x;
+//       //   const dz = tgt.z - baseWP.z;
+// 
+//       //   // Note: arm's outward direction in turret-local frame is +X.
+//       //   // Standard yaw: atan2(dx, dz) aims local +Z; we want local +X. So use atan2(dz, dx) negated, OR rotate by +π/2.
+//       //   // Easier: aim the arm's local +X by yaw = atan2(dz, dx)? No — let's stick with whichever
+//       //   // axis the GLB actually extends along. Joint_Elbow translates +X 0.355 → arm extends +X.
+//       //   // So we want yaw such that turret-local +X points at the target.
+//       //   // World direction to target on XZ plane: (dx, dz).
+//       //   // After yaw θ around Y, local +X maps to world (cos θ, 0, -sin θ).
+//       //   // Setting that equal to normalized (dx, dz): cos θ = dx/r, -sin θ = dz/r  →  θ = atan2(-dz, dx).
+//       //   const r2d = Math.hypot(dx, dz) || 1;
+//       //   const rawYaw = Math.atan2(-dz, dx);
+// 
+//       //   const prev = root.userData._ikYaw as number;
+//       //   let delta = rawYaw - prev;
+//       //   while (delta >  Math.PI) delta -= 2 * Math.PI;
+//       //   while (delta < -Math.PI) delta += 2 * Math.PI;
+//       //   const newYaw = prev + delta;
+//       //   root.userData._ikYaw = newYaw;
+//       //   qTmp.setFromAxisAngle(axisY, newYaw);
+//       //   turret.quaternion.slerp(qTmp, 0.20).normalize();
+// 
+//       //   // ── 2. Target in shoulder-local plane ──────────────────────────────────
+//       //   // After the turret is yawed, the arm reaches outward along +X in turret-local space.
+//       //   // The horizontal reach we need to solve for is the distance from the shoulder
+//       //   // pivot to the (projected) target on the horizontal plane.
+//       //   // We use world distance directly to avoid issues with slerp lag:
+//       //   const reachHoriz = r2d;                          // horizontal distance shoulder→target
+//       //   const verticalOff = tgt.y - (baseWP.y + SHOULDER_Y);
+// 
+//       //   // The blade tip sits L3 beyond the wrist along +X. So the WRIST must reach
+//       //   // a point that is L3 closer to the shoulder than the target:
+//       //   const wx = reachHoriz - L3;
+//       //   const wy = verticalOff;
+// 
+//       //   // ── 3. Solve 2-link IK in the (wx, wy) plane ──────────────────────────
+//       //   let D = Math.hypot(wx, wy);
+// 
+//       //   // Reach limits — keep the arm slightly bent at extremes to avoid singularity,
+//       //   // and prevent inversion when target is too close.
+//       //   const Dmax = (L1 + L2) * 1.4;                   // 97% of max reach
+//       //   const Dmin = Math.abs(L1 - L2) + 0.02;
+//       //   D = Math.max(Dmin, Math.min(Dmax, D));
+// 
+//       //   // Law of cosines:
+//       //   //   cos(elbow_interior) = (L1² + L2² - D²) / (2·L1·L2)
+//       //   // When D = Dmax, elbow_interior ≈ 0 (arm nearly straight) — fine.
+//       //   // When D = Dmin, elbow_interior ≈ π (arm fully folded) — also fine.
+//       //   const cosElbow = (L1 * L1 + L2 * L2 - D * D) / (2 * L1 * L2);
+//       //   const elbowInterior = Math.acos(Math.max(-1, Math.min(1, cosElbow)));
+// 
+//       //   // Angle from shoulder to wrist target, measured from local +X (outward).
+//       //   // wx = outward, wy = up.  atan2(wy, wx) ∈ (-π, π].
+//       //   const wristDirAng = Math.atan2(wy, wx);
+// 
+//       //   // Offset between upper-arm direction and shoulder→wrist line:
+//       //   //   cos(offset) = (L1² + D² - L2²) / (2·L1·D)
+//       //   const cosShOff = (L1 * L1 + D * D - L2 * L2) / (2 * L1 * D);
+//       //   const shOff = Math.acos(Math.max(-1, Math.min(1, cosShOff)));
+// 
+//       //   // ── 4. ELBOW-UP branch (upper arm goes ABOVE the line to wrist) ───────
+//       //   // This is the natural SCARA-style "shoulder lifts, elbow droops back down"
+//       //   // silhouette for an outward-reaching horizontal arm.
+//       //   //
+//       //   //   shoulderAngle =  wristDirAng + shOff      (rotates upper arm UP)
+//       //   //   elbowAngle    = -(π - elbowInterior)      (forearm rotates DOWN to reach wrist)
+//       //   //
+//       //   // Sign convention: positive Z-rotation rotates local +X toward local +Y (up).
+//       //   const shoulderAngle = wristDirAng + shOff;
+//       //   const elbowAngle    = -(Math.PI - elbowInterior);
+// 
+//       //   // ── 5. Wrist keeps blade level ────────────────────────────────────────
+//       //   // Chain pitches sum to zero so blade points horizontally:
+//       //   //   shoulderAngle + elbowAngle + wristAngle = 0
+//       //   const wristAngle = -(shoulderAngle + elbowAngle);
+// 
+//       //   // ── 6. Apply ──────────────────────────────────────────────────────────
+//       //   qTmp.setFromAxisAngle(axisZ, shoulderAngle);
+//       //   shoulder.quaternion.slerp(qTmp, 0.22).normalize();
+// 
+//       //   qTmp.setFromAxisAngle(axisZ, elbowAngle);
+//       //   elbow.quaternion.slerp(qTmp, 0.22).normalize();
+// 
+//       //   // Forearm is a rigid link in this rig
+//       //   foreArm.quaternion.slerp(new THREE.Quaternion(), 0.15).normalize();
+// 
+//       //   qTmp.setFromAxisAngle(axisZ, wristAngle);
+//       //   wrist.quaternion.slerp(qTmp, 0.22).normalize();
+//       // }
+// 
+// 
+//       // function runIK(tgt: THREE.Vector3): void {
+//       //   // ── 1. Turret yaw ──
+//       //   const baseWP = new THREE.Vector3();
+//       //   root.getWorldPosition(baseWP);
+//       //   const dx = tgt.x - baseWP.x;
+//       //   const dz = tgt.z - baseWP.z;
+//       //   const r2d = Math.hypot(dx, dz) || 1;
+//       //   const rawYaw = Math.atan2(-dz, dx);
+// 
+//       //   const prev = root.userData._ikYaw as number;
+//       //   let delta = rawYaw - prev;
+//       //   while (delta >  Math.PI) delta -= 2 * Math.PI;
+//       //   while (delta < -Math.PI) delta += 2 * Math.PI;
+//       //   const newYaw = prev + delta;
+//       //   root.userData._ikYaw = newYaw;
+//       //   qTmp.setFromAxisAngle(axisY, newYaw);
+//       //   turret.quaternion.slerp(qTmp, 0.20).normalize();
+// 
+//       //   // ── 2. 2-link IK in shoulder-local plane ──
+//       //   const reachHoriz = Math.max(r2d, 0.1);  // tiny minimum to avoid singularity
+//       //   const verticalOff = tgt.y - (baseWP.y + SHOULDER_Y);
+// 
+//       //   const wx = reachHoriz - L3;
+//       //   const wy = verticalOff;
+// 
+//       //   let D = Math.hypot(wx, wy);
+//       //   const Dmax = (L1 + L2) * 0.98;
+//       //   const Dmin = Math.abs(L1 - L2) + 0.02;
+//       //   D = Math.max(Dmin, Math.min(Dmax, D));
+// 
+//       //   const cosElbow = (L1 * L1 + L2 * L2 - D * D) / (2 * L1 * L2);
+//       //   const elbowInterior = Math.acos(Math.max(-1, Math.min(1, cosElbow)));
+// 
+//       //   const wristDirAng = Math.atan2(wy, wx);
+//       //   const cosShOff = (L1 * L1 + D * D - L2 * L2) / (2 * L1 * D);
+//       //   const shOff = Math.acos(Math.max(-1, Math.min(1, cosShOff)));
+// 
+//       //   // ── ELBOW-UP branch ──
+//       //   let shoulderAngle = wristDirAng + shOff;
+//       //   let elbowAngle    = -(Math.PI - elbowInterior);
+// 
+//       //   // ── Joint limits (loose) ──
+//       //   shoulderAngle = Math.max(-0.4, Math.min(Math.PI * 0.7, shoulderAngle));
+//       //   elbowAngle    = Math.max(-Math.PI * 0.95, Math.min(-0.03, elbowAngle));
+// 
+//       //   let wristAngle = -(shoulderAngle + elbowAngle);
+//       //   wristAngle = Math.max(-Math.PI * 0.8, Math.min(Math.PI * 0.8, wristAngle));
+// 
+//       //   qTmp.setFromAxisAngle(axisZ, shoulderAngle);
+//       //   shoulder.quaternion.slerp(qTmp, 0.22).normalize();
+// 
+//       //   qTmp.setFromAxisAngle(axisZ, elbowAngle);
+//       //   elbow.quaternion.slerp(qTmp, 0.22).normalize();
+// 
+//       //   foreArm.quaternion.slerp(new THREE.Quaternion(), 0.15).normalize();
+// 
+//       //   qTmp.setFromAxisAngle(axisZ, wristAngle);
+//       //   wrist.quaternion.slerp(qTmp, 0.22).normalize();
+//       // }
+//       // function runIK(tgt: THREE.Vector3): void {
+//       //   // ── FLOOR CLEARANCE GUARD ──────────────────────────────────────
+//       //   // Clamp target Y so the end-effector never descends below a safe
+//       //   // clearance height above the module tops (~3.7 units from floor).
+//       //   const MIN_SAFE_Y = 3.7;          // ← tune: MODULE_BASE_Y + H + margin
+//       //   const clampedTgt = tgt.clone();
+//       //   clampedTgt.y = Math.max(tgt.y, MIN_SAFE_Y);
+// 
+//       //   // ── 1. Turret yaw ──
+//       //   const baseWP = new THREE.Vector3();
+//       //   root.getWorldPosition(baseWP);
+//       //   const dx = clampedTgt.x - baseWP.x;
+//       //   const dz = clampedTgt.z - baseWP.z;
+//       //   const r2d = Math.hypot(dx, dz) || 1;
+//       //   const rawYaw = Math.atan2(-dz, dx);
+// 
+//       //   const prev = root.userData._ikYaw as number;
+//       //   let delta = rawYaw - prev;
+//       //   while (delta >  Math.PI) delta -= 2 * Math.PI;
+//       //   while (delta < -Math.PI) delta += 2 * Math.PI;
+//       //   const newYaw = prev + delta;
+//       //   root.userData._ikYaw = newYaw;
+//       //   qTmp.setFromAxisAngle(axisY, newYaw);
+//       //   turret.quaternion.slerp(qTmp, 0.20).normalize();
+// 
+//       //   // ── 2. 2-link IK in shoulder-local plane ──
+//       //   const reachHoriz = Math.max(r2d, 0.1);
+//       //   const verticalOff = clampedTgt.y - (baseWP.y + SHOULDER_Y);  // ← use clamped Y
+// 
+//       //   const wx = reachHoriz - L3;
+//       //   const wy = verticalOff;
+// 
+//       //   let D = Math.hypot(wx, wy);
+//       //   const Dmax = (L1 + L2) * 0.98;
+//       //   const Dmin = Math.abs(L1 - L2) + 0.02;
+//       //   D = Math.max(Dmin, Math.min(Dmax, D));
+// 
+//       //   const cosElbow = (L1 * L1 + L2 * L2 - D * D) / (2 * L1 * L2);
+//       //   const elbowInterior = Math.acos(Math.max(-1, Math.min(1, cosElbow)));
+// 
+//       //   const wristDirAng = Math.atan2(wy, wx);
+//       //   const cosShOff = (L1 * L1 + D * D - L2 * L2) / (2 * L1 * D);
+//       //   const shOff = Math.acos(Math.max(-1, Math.min(1, cosShOff)));
+// 
+//       //   // ── ELBOW-UP branch ──
+//       //   let shoulderAngle = wristDirAng + shOff;
+//       //   let elbowAngle    = -(Math.PI - elbowInterior);
+// 
+//       //   // ── Joint limits — tightened to prevent floor crash ──
+//       //   // FIX: raised shoulder min from -0.4 → +0.05 so arm never dips below horizon
+//       //   shoulderAngle = Math.max(0.05, Math.min(Math.PI * 0.7, shoulderAngle));
+//       //   // FIX: tightened elbow upper bound from -0.03 → -0.10 prevents hyper-extension low
+//       //   elbowAngle    = Math.max(-Math.PI * 0.95, Math.min(-0.10, elbowAngle));
+// 
+//       //   // ── Wrist compensation with clearance clamp ──
+//       //   let wristAngle = -(shoulderAngle + elbowAngle);
+//       //   // FIX: clamp wrist so it can't pitch the end-effector downward past level
+//       //   wristAngle = Math.max(-Math.PI * 0.5, Math.min(Math.PI * 0.8, wristAngle));
+// 
+//       //   qTmp.setFromAxisAngle(axisZ, shoulderAngle);
+//       //   shoulder.quaternion.slerp(qTmp, 0.22).normalize();
+// 
+//       //   qTmp.setFromAxisAngle(axisZ, elbowAngle);
+//       //   elbow.quaternion.slerp(qTmp, 0.22).normalize();
+// 
+//       //   foreArm.quaternion.slerp(new THREE.Quaternion(), 0.15).normalize();
+// 
+//       //   qTmp.setFromAxisAngle(axisZ, wristAngle);
+//       //   wrist.quaternion.slerp(qTmp, 0.22).normalize();
+//       // }
+// 
+// 
+//       // ── Hydraulic Lift Cylinder — global state ──
+//       let liftCylinder: THREE.Object3D | null = null;   // assigned when robot is built
+//       let currentLiftHeight = 0.0;
+// 
+//       function setLiftHeight(targetHeight: number, speed = 0.25) {
+//         currentLiftHeight = THREE.MathUtils.lerp(currentLiftHeight, targetHeight, speed);
+//         if (liftCylinder) {
+//           // Scale the cylinder along Y and shift its base position
+//           liftCylinder.scale.y = Math.max(0.3, 1 + currentLiftHeight * 2.5);
+//           liftCylinder.position.y = currentLiftHeight * 0.8;
+//         }
+//       }
+// 
+//       function clamp(x: number, min: number, max: number): number {
+//         return Math.max(min, Math.min(max, x));
+//       }
+// 
+//       function runIK(tgt: THREE.Vector3, options: {
+//   isScanner?: boolean;
+//   isHMDS?: boolean;
+//   isDIRinse?: boolean;
+//   isHardBake?: boolean;     // ← NEW
+//   isTravel?: boolean;
+//   placeHeightOffset?: number;
+//   approachHeight?: number;
+//   safetyMargin?: number;
+// } = {}): void {
+//   const {
+//     isScanner = false,
+//     isHMDS = false,
+//     isDIRinse = false,
+//     isHardBake = false,     // ← NEW
+//     isTravel = false,
+//     placeHeightOffset = 0.0,
+//     approachHeight = 0.12,
+//     safetyMargin = 0.08,
+//   } = options;
+// 
+//         // ══════════════════════════════════════════════════════════════════════
+//         // 0. SANITY CHECK on target — prevent NaN/Infinity from breaking IK
+//         // ══════════════════════════════════════════════════════════════════════
+//         if (!Number.isFinite(tgt.x) || !Number.isFinite(tgt.y) || !Number.isFinite(tgt.z)) {
+//           console.warn('[IK] Invalid target — skipping', tgt);
+//           return;
+//         }
+// 
+//         // ══════════════════════════════════════════════════════════════════════
+//         // 1. LIFT HEIGHT — column rises higher for tall modules (scanner especially)
+//         // ══════════════════════════════════════════════════════════════════════
+//        let requiredLift = 0.0;
+//   if (isScanner) {
+//     requiredLift = 0.88;
+//   } else if (isHMDS) {
+//     requiredLift = 0.28;
+//   } else if (isDIRinse) {
+//     requiredLift = 0.22;
+//   } else if (isHardBake) {
+//     requiredLift = 0.32;     // ← NEW — tune this against the box wall height in your screenshot
+//   }
+// 
+//         // ── Faster column rise for scanner (smaller smoothing factor = quicker) ──
+//         const liftSmoothing = isScanner ? 0.25 : 0.18;
+//         setLiftHeight(requiredLift, liftSmoothing);
+// 
+//         // ══════════════════════════════════════════════════════════════════════
+//         // 2. TURRET YAW — with safe shortest-path resolution
+//         // ══════════════════════════════════════════════════════════════════════
+//         const baseWP = new THREE.Vector3();
+//         root.getWorldPosition(baseWP);
+//         const dx = tgt.x - baseWP.x;
+//         const dz = tgt.z - baseWP.z;
+//         const r2d = Math.hypot(dx, dz);
+// 
+//         // ── CRITICAL: Avoid yaw singularity when target is directly above base ──
+//         // For HMDS especially, the wafer can be very close to the base,
+//         // causing dx/dz to be near-zero and atan2 to flip wildly.
+//         // Implement hysteresis + rate-limited logging to avoid console spam.
+//         const closeThresh = isHMDS ? 0.15 : 0.12;
+//         const reopenThresh = closeThresh + 0.04;
+//         const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+//         const lastWarn = (root.userData._ikLastCloseWarn as number) ?? 0;
+//         const locked = !!root.userData._ikYawLocked;
+// 
+//         if (r2d < closeThresh) {
+//           if (!locked) {
+//             root.userData._ikYawLocked = true;
+//             root.userData._ikLastCloseWarn = now;
+//             console.warn('[IK] Target too close to base — yaw locked');
+//           } else if (now - lastWarn > 2000) {
+//             // periodic reminder if still stuck close for a while
+//             root.userData._ikLastCloseWarn = now;
+//             console.warn('[IK] Target too close to base — yaw still locked');
+//           }
+//           // keep previous yaw, skip update
+//         } else {
+//           // If we were locked and target moved away past reopen threshold, unlock
+//           if (locked && r2d > reopenThresh) {
+//             root.userData._ikYawLocked = false;
+//             // log unlock once
+//             console.info('[IK] Target moved away from base — yaw unlocked');
+//           }
+// 
+//           const rootYaw = EFEM_RIGHT_SIDE_YAW;
+//           const rawYaw = Math.atan2(-dz, dx) - rootYaw;
+//           const prev = (root.userData._ikYaw as number) ?? rawYaw;
+//           let delta = rawYaw - prev;
+// 
+//           // ── Normalize delta to [-π, π]
+//           delta = Math.atan2(Math.sin(delta), Math.cos(delta));
+// 
+//           // ── HMDS extra safety: limit rotation speed when going through tight angles
+//           let yawStepLimit = Math.PI;
+//           if (isHMDS) yawStepLimit = Math.PI * 0.6;
+//           if (Math.abs(delta) > yawStepLimit) delta = Math.sign(delta) * yawStepLimit;
+// 
+//           const newYaw = prev + delta;
+//           root.userData._ikYaw = newYaw;
+//           qTmp.setFromAxisAngle(axisY, newYaw);
+// 
+//           // Slower slerp for HMDS or travel to prevent overshoot
+//           const yawSlerpRate = isHMDS || isTravel ? 0.12 : 0.18;
+//           turret.quaternion.slerp(qTmp, yawSlerpRate).normalize();
+//         }
+// 
+//         // ══════════════════════════════════════════════════════════════════════
+//         // 3. ARM IK — 2-link in shoulder-local plane with crash protection
+//         // ══════════════════════════════════════════════════════════════════════
+//         const shoulderBaseY = baseWP.y + SHOULDER_Y + currentLiftHeight * 0.9;
+//         let finalTargetY = tgt.y + placeHeightOffset;
+// 
+//         // ── HMDS gets extra approach height to clear walls ──
+//         if (isHMDS) {
+//           finalTargetY += 0.05;       // raise approach by 5cm
+//         }
+//         if (isTravel) {
+//           const SAFE_TRAVEL_Y = WAFER_TRANSFER_Y + 1.2;   // keep travel motion well above all modules
+//           finalTargetY = Math.max(finalTargetY, SAFE_TRAVEL_Y);
+//         }
+// 
+//         const verticalOff = finalTargetY - shoulderBaseY + Math.max(safetyMargin, isTravel ? 0.12 : 0.0);
+//         const reachHoriz = Math.max(r2d, 0.15);   // bumped min from 0.12 to 0.15
+// 
+//         const wx = reachHoriz - L3;
+//         const wy = verticalOff;
+// 
+//         // ── CRITICAL: Validate wx, wy before computing D ──
+//         if (!Number.isFinite(wx) || !Number.isFinite(wy)) {
+//           console.warn('[IK] Invalid wrist target — aborting arm IK');
+//           return;
+//         }
+// 
+//         let D = Math.hypot(wx, wy);
+// 
+//         // ── Reach clamping with HMDS-specific tighter bounds ──
+//         const Dmax = (L1 + L2) * (isHMDS ? 0.92 : 0.96);   // ← Tighter for HMDS
+//         const Dmin = Math.abs(L1 - L2) + (isHMDS ? 0.08 : 0.04);
+//         D = Math.max(Dmin, Math.min(Dmax, D));
+// 
+//         // ── CRITICAL: Guard against D being zero or invalid ──
+//         if (D < 0.001 || !Number.isFinite(D)) {
+//           console.warn('[IK] Degenerate reach — aborting');
+//           return;
+//         }
+// 
+//         // Law of Cosines with clamping (prevents NaN from floating point error)
+//         const cosElbow = clamp((L1 * L1 + L2 * L2 - D * D) / (2 * L1 * L2), -1, 1);
+//         const elbowInterior = Math.acos(cosElbow);
+// 
+//         const wristDirAng = Math.atan2(wy, wx);
+//         const cosShOff = clamp((L1 * L1 + D * D - L2 * L2) / (2 * L1 * D), -1, 1);
+//         const shOff = Math.acos(cosShOff);
+// 
+//         // ── CRITICAL: Validate computed angles ──
+//         if (!Number.isFinite(elbowInterior) || !Number.isFinite(wristDirAng) || !Number.isFinite(shOff)) {
+//           console.warn('[IK] NaN in IK computation — aborting');
+//           return;
+//         }
+// 
+//         // ── Elbow-up branch ──
+//         let shoulderAngle = wristDirAng + shOff;
+//         let elbowAngle = -(Math.PI - elbowInterior);
+// 
+//         // ── HMDS-specific joint limits (slightly more conservative) ──
+//         if (isHMDS) {
+//           shoulderAngle = clamp(shoulderAngle, -0.50, Math.PI * 0.60);   // tighter shoulder range
+//           elbowAngle = clamp(elbowAngle, -Math.PI * 0.80, -0.15);  // tighter elbow range
+//         } else if (isScanner) {
+//           // Scanner needs wide upward shoulder range to reach raised slot
+//           shoulderAngle = clamp(shoulderAngle, -0.30, Math.PI * 0.85);   // ← higher upper limit
+//           elbowAngle = clamp(elbowAngle, -Math.PI * 0.90, 0.05);   // ← allows straighter arm
+//         } else {
+//           shoulderAngle = clamp(shoulderAngle, isTravel ? 0.10 : -0.65, Math.PI * 0.70);
+//           elbowAngle = clamp(elbowAngle, -Math.PI * 0.85, -0.10);
+//         }
+// 
+//         let wristAngle = -(shoulderAngle + elbowAngle);
+//         wristAngle = clamp(wristAngle, -Math.PI * 0.80, Math.PI * 0.80);
+// 
+//         // ══════════════════════════════════════════════════════════════════════
+//         // 4. APPLY ROTATIONS — with HMDS slower slerp to prevent crash
+//         // ══════════════════════════════════════════════════════════════════════
+//         const armSlerpRate = isHMDS || isTravel ? 0.14 : 0.20;   // slower for HMDS/travel = smoother
+// 
+//         qTmp.setFromAxisAngle(axisZ, shoulderAngle);
+//         shoulder.quaternion.slerp(qTmp, armSlerpRate).normalize();
+// 
+//         qTmp.setFromAxisAngle(axisZ, elbowAngle);
+//         elbow.quaternion.slerp(qTmp, armSlerpRate).normalize();
+// 
+//         foreArm.quaternion.slerp(new THREE.Quaternion(), armSlerpRate).normalize();
+// 
+//         qTmp.setFromAxisAngle(axisZ, wristAngle);
+//         wrist.quaternion.slerp(qTmp, armSlerpRate).normalize();
+//       }
+// 
+// 
+// 
+// 
+//       function getJoints(): JointData {
+//         eTmp.setFromQuaternion(turret.quaternion, "YXZ");
+//         const baseA = eTmp.y;
+//         eTmp.setFromQuaternion(shoulder.quaternion, "XYZ");
+//         const shoulderA = eTmp.z;
+//         eTmp.setFromQuaternion(elbow.quaternion, "XYZ");
+//         const elbowA = eTmp.z;
+//         eTmp.setFromQuaternion(wrist.quaternion, "XYZ");
+//         const wristA = eTmp.z;
+//         return {
+//           base: { c: baseA },
+//           shoulder: { c: shoulderA },
+//           elbow: { c: elbowA },
+//           wrist: { c: wristA },
+//         };
+//       }
+// 
+//       console.log('=== NEW ROBOT BOUND ===');
+//       console.log('  turret  :', turret.name);
+//       console.log('  shoulder:', shoulder.name);
+//       console.log('  elbow   :', elbow.name);
+//       console.log('  foreArm :', foreArm.name);
+//       console.log('  wrist   :', wrist.name);
+//       console.log('  blade   :', fork.name);
+//       console.log(`  L1=${L1.toFixed(3)} L2=${L2.toFixed(3)} L3=${L3.toFixed(3)} SH_Y=${SHOULDER_Y.toFixed(3)}`);
+// 
+//       onReady({
+//         group: root,
+//         turret,
+//         shoulder,
+//         upperArm: shoulder,           // alias — no separate upperArm in this rig
+//         elbow,
+//         foreArm,
+//         wrist,
+//         gripper,
+//         fork,
+//         statusPL,
+//         basePos: basePos.clone(),
+//         runIK,
+//         getJoints,
+//         worldPos: () => {
+//           const v = new THREE.Vector3();
+//           fork.getWorldPosition(v);
+//           return v;
+//         },
+//       });
+//     },
+//     (p: any) => {
+//       if (p.total > 0) console.log('GLB loading:', Math.round(p.loaded / p.total * 100) + '%');
+//     },
+//     (err: any) => console.error('GLB FAILED:', err)
+//   );
+// }
 
 
 
@@ -5286,911 +5416,916 @@ function positionWaferAnchorAboveChuck(
   return waferAnchor;
 }
 
-function buildDehydrationGLB(
-  scene: THREE.Scene,
-  mod: ProcessStep,
-  onReady?: (group: THREE.Group) => void
-): THREE.Group {
-  const placeholder = new THREE.Group();
-  placeholder.position.set(mod.x, 0, mod.z);
-  placeholder.userData.id = mod.id;
-  scene.add(placeholder);
-
-(async () => { const { GLTFLoader } = await import('three/examples/jsm/loaders/GLTFLoader.js'); const loader = new GLTFLoader();
-  loader.load(
-    '/dehydration.glb',
-    (gltf: any) => {
-      const root = gltf.scene as THREE.Group;
-
-      const tempBox = new THREE.Box3().setFromObject(root);
-      const size = new THREE.Vector3();
-      tempBox.getSize(size);
-
-      const targetW = 6;
-      const currentMax = Math.max(size.x, size.z);
-      const scale = targetW / currentMax;
-      root.scale.setScalar(scale);
-
-      const box = new THREE.Box3().setFromObject(root);
-      root.position.y = PLINTH_TOP_Y - box.min.y;
-
-      const namedParts: Record<string, THREE.Object3D> = {};
-      root.traverse((obj) => {
-        namedParts[obj.name] = obj;
-        if ((obj as THREE.Mesh).isMesh) {
-          obj.castShadow = true;
-          obj.receiveShadow = true;
-        }
-      });
-
-      const hotPlate =
-        namedParts['HotPlate'] ||
-        namedParts['Hot_Plate'] ||
-        namedParts['Plate'] ||
-        namedParts['Heater'] ||
-        namedParts['Top'];
-
-      const lightGreen =
-        namedParts['LightGreen'] || namedParts['Light_Green'] || namedParts['LED_Green'];
-      const lightRed =
-        namedParts['LightRed'] || namedParts['Light_Red'] || namedParts['LED_Red'];
-
-      const colorScheme: Record<string, { base: number; emissive: number; light: number; pl: number }> = {
-        dehy: { base: 0x4a2a15, emissive: 0xff6622, light: 0xff6622, pl: 0xff5500 },
-        pab: { base: 0x5a1505, emissive: 0xff3322, light: 0xff2233, pl: 0xff2200 },
-        hardbake: { base: 0x4a1808, emissive: 0xff4422, light: 0xff3300, pl: 0xff3300 },
-      };
-      const scheme = colorScheme[mod.id] ?? colorScheme.dehy;
-
-      if (hotPlate && (hotPlate as THREE.Mesh).isMesh) {
-        const heatMat = new THREE.MeshStandardMaterial({
-          color: scheme.base,
-          emissive: scheme.emissive,
-          emissiveIntensity: 1.8,
-          roughness: 0.45,
-          metalness: 0.5,
-        });
-        (hotPlate as THREE.Mesh).material = heatMat;
-        placeholder.userData.heatMaterial = heatMat;
-        placeholder.userData.colorScheme = scheme;
-      }
-
-      if (lightGreen && (lightGreen as THREE.Mesh).isMesh) {
-        const greenMat = new THREE.MeshStandardMaterial({
-          color: 0x002200, emissive: 0x00ff44, emissiveIntensity: 4.0, roughness: 0.4,
-        });
-        (lightGreen as THREE.Mesh).material = greenMat;
-        placeholder.userData.greenLight = greenMat;
-      }
-
-      if (lightRed && (lightRed as THREE.Mesh).isMesh) {
-        const redMat = new THREE.MeshStandardMaterial({
-          color: 0x220000, emissive: 0xff0033, emissiveIntensity: 1.0, roughness: 0.4,
-        });
-        (lightRed as THREE.Mesh).material = redMat;
-        placeholder.userData.redLight = redMat;
-      }
-
-      const pl = new THREE.PointLight(0xff5500, 0, 6);
-      pl.position.set(0, 1.2, 0);
-      root.add(pl);
-      placeholder.userData.processLight = pl;
-
-      placeholder.add(root);
-      placeholder.userData.glbRoot = root;
-      placeholder.userData.loaded = true;
-
-      addModuleLabel(placeholder, mod);
-      // ── ADD VISIBLE HOT PLATE CHUCK (force on top of GLB body) ──
-      // Chuck is already positioned correctly by addWaferChuck - no override needed
-      positionWaferAnchorAboveChuck(placeholder, root);
-
-      if (onReady) onReady(placeholder);
-    },
-    undefined,
-    (err: any) => {
-      console.error('Dehydration GLB failed to load:', err);
-    }
-  );
-})();
-
-  return placeholder;
-}
-
-
-
-function buildHardBakeGLB(
-  scene: THREE.Scene,
-  mod: ProcessStep,
-  onReady?: (group: THREE.Group) => void
-): THREE.Group {
-  const placeholder = new THREE.Group();
-  placeholder.position.set(mod.x, 0, mod.z);
-  placeholder.userData.id = mod.id;
-  scene.add(placeholder);
-
-(async () => { const { GLTFLoader } = await import('three/examples/jsm/loaders/GLTFLoader.js'); const loader = new GLTFLoader();
-  loader.load(
-  '/hardbakeglb.glb',
-  (gltf: any) => {
-    const root = gltf.scene as THREE.Group;
-
-    // ── NEW: rotate the model to align with the plinth before measuring/centering ──
-    root.rotation.y = Math.PI;   // try Math.PI/2, -Math.PI/2, or Math.PI — see which squares it up
-
-    const tempBox = new THREE.Box3().setFromObject(root);
-    const size = new THREE.Vector3();
-    tempBox.getSize(size);
-
-    const targetW = 4;
-    const currentMax = Math.max(size.x, size.z);
-    const scale = targetW / currentMax;
-    root.scale.setScalar(scale);
-
-    const box = new THREE.Box3().setFromObject(root);
-    root.position.y = PLINTH_TOP_Y - box.min.y;
-    const afterBox = new THREE.Box3().setFromObject(root);
-const afterCenter = new THREE.Vector3();
-afterBox.getCenter(afterCenter);
-root.position.x -= afterCenter.x;
-root.position.z -= afterCenter.z;   // ← ADD THIS LINE (was previously skipped)
-
-      // ── NEW: record real half-depth so nameplates can sit flush against this GLB's actual front face ──
-      const finalBox = new THREE.Box3().setFromObject(root);
-      placeholder.userData.halfDepth = (finalBox.max.z - finalBox.min.z) / 2;
-
-      const namedParts: Record<string, THREE.Object3D> = {};
-      root.traverse((obj) => {
-        namedParts[obj.name] = obj;
-        if ((obj as THREE.Mesh).isMesh) {
-          obj.castShadow = true;
-          obj.receiveShadow = true;
-        }
-      });
-
-      const hotPlate =
-        namedParts['HotPlate'] || namedParts['Hot_Plate'] ||
-        namedParts['Plate'] || namedParts['Heater'] || namedParts['Top'];
-
-      const lightGreen =
-        namedParts['LightGreen'] || namedParts['Light_Green'] || namedParts['LED_Green'];
-      const lightRed =
-        namedParts['LightRed'] || namedParts['Light_Red'] || namedParts['LED_Red'];
-
-      const scheme = { base: 0x4a1808, emissive: 0xff4422, light: 0xff3300, pl: 0xff3300 };
-
-      if (hotPlate && (hotPlate as THREE.Mesh).isMesh) {
-        const heatMat = new THREE.MeshStandardMaterial({
-          color: scheme.base,
-          emissive: scheme.emissive,
-          emissiveIntensity: 2.2,
-          roughness: 0.45,
-          metalness: 0.5,
-        });
-        (hotPlate as THREE.Mesh).material = heatMat;
-        placeholder.userData.heatMaterial = heatMat;
-        placeholder.userData.colorScheme = scheme;
-      }
-
-      if (lightGreen && (lightGreen as THREE.Mesh).isMesh) {
-        const greenMat = new THREE.MeshStandardMaterial({
-          color: 0x002200, emissive: 0x00ff44, emissiveIntensity: 4.0, roughness: 0.4,
-        });
-        (lightGreen as THREE.Mesh).material = greenMat;
-        placeholder.userData.greenLight = greenMat;
-      }
-
-      if (lightRed && (lightRed as THREE.Mesh).isMesh) {
-        const redMat = new THREE.MeshStandardMaterial({
-          color: 0x220000, emissive: 0xff0033, emissiveIntensity: 1.0, roughness: 0.4,
-        });
-        (lightRed as THREE.Mesh).material = redMat;
-        placeholder.userData.redLight = redMat;
-      }
-
-      const pl = new THREE.PointLight(scheme.pl, 0, 7);
-      pl.position.set(0, 1.2, 0);
-      root.add(pl);
-      placeholder.userData.processLight = pl;
-
-      placeholder.add(root);
-      placeholder.userData.glbRoot = root;
-      placeholder.userData.loaded = true;
-
-      addModuleLabel(placeholder, mod);
-
-      // ── NO chuck added here — the GLB already has its own hotplate surface
-      // ── Just set the wafer anchor so robot knows where to place the wafer
-      positionWaferAnchorAboveChuck(placeholder, root);
-
-      if (onReady) onReady(placeholder);
-    },
-    undefined,
-    (err: any) => console.error('HardBake GLB failed to load:', err)
-  );})();
-
-  return placeholder;
-}
-
-
-
-
-
-function buildPrCoatGLB(
-  scene: THREE.Scene,
-  mod: ProcessStep,
-  onReady?: (group: THREE.Group) => void
-): THREE.Group {
-  const placeholder = new THREE.Group();
-  placeholder.position.set(mod.x, 0, mod.z);
-  placeholder.userData.id = mod.id;
-  scene.add(placeholder);
-
-  const loader = new GLTFLoader();
-  loader.load(
-    '/PRCoat.glb',
-    (gltf: any) => {
-      const root = gltf.scene as THREE.Group;
-
-      const tempBox = new THREE.Box3().setFromObject(root);
-      const size = new THREE.Vector3();
-      tempBox.getSize(size);
-
-      const targetW = 3;
-      const currentMax = Math.max(size.x, size.z);
-      const scale = targetW / currentMax;
-      root.scale.setScalar(scale);
-
-      const box = new THREE.Box3().setFromObject(root);
-      root.position.y = PLINTH_TOP_Y - box.min.y;
-
-      const namedParts: Record<string, THREE.Object3D> = {};
-      root.traverse((obj) => {
-        namedParts[obj.name] = obj;
-        if ((obj as THREE.Mesh).isMesh) {
-          obj.castShadow = true;
-          obj.receiveShadow = true;
-        }
-      });
-
-      const spinChuck =
-        namedParts['SpinChuck'] || namedParts['Spin_Chuck'] ||
-        namedParts['Chuck'] || namedParts['Spinner'] ||
-        namedParts['HotPlate'] || namedParts['Plate'] ||
-        namedParts['Top'];
-
-      const dispenseArm =
-        namedParts['DispenseArm'] || namedParts['Dispense_Arm'] ||
-        namedParts['Arm'] || namedParts['NozzleArm'];
-
-      const lightGreen =
-        namedParts['LightGreen'] || namedParts['Light_Green'] || namedParts['LED_Green'];
-      const lightRed =
-        namedParts['LightRed'] || namedParts['Light_Red'] || namedParts['LED_Red'];
-
-      const scheme = { base: 0x180a28, emissive: 0xcc00ff, light: 0xee44ff, pl: 0xcc00ff };
-
-      if (spinChuck && (spinChuck as THREE.Mesh).isMesh) {
-        const chuckMat = new THREE.MeshStandardMaterial({
-          color: 0x445566,
-          emissive: scheme.emissive,
-          emissiveIntensity: 0.3,
-          roughness: 0.15,
-          metalness: 0.92,
-        });
-        (spinChuck as THREE.Mesh).material = chuckMat;
-        placeholder.userData.chuckMaterial = chuckMat;
-        placeholder.userData.spinChuck = spinChuck;
-        placeholder.userData.colorScheme = scheme;
-      }
-
-      if (dispenseArm) {
-        placeholder.userData.dispenseArm = dispenseArm;
-        placeholder.userData.armRestY = (dispenseArm as THREE.Object3D).rotation.y;
-      }
-
-      if (lightGreen && (lightGreen as THREE.Mesh).isMesh) {
-        const greenMat = new THREE.MeshStandardMaterial({
-          color: 0x002200, emissive: 0x00ff44, emissiveIntensity: 4.0, roughness: 0.4,
-        });
-        (lightGreen as THREE.Mesh).material = greenMat;
-        placeholder.userData.greenLight = greenMat;
-      }
-
-      if (lightRed && (lightRed as THREE.Mesh).isMesh) {
-        const redMat = new THREE.MeshStandardMaterial({
-          color: 0x220000, emissive: 0xff0033, emissiveIntensity: 1.0, roughness: 0.4,
-        });
-        (lightRed as THREE.Mesh).material = redMat;
-        placeholder.userData.redLight = redMat;
-      }
-
-      const pl = new THREE.PointLight(scheme.pl, 0, 7);
-      pl.position.set(0, 1.2, 0);
-      root.add(pl);
-      placeholder.userData.processLight = pl;
-
-      placeholder.add(root);
-      placeholder.userData.glbRoot = root;
-      placeholder.userData.loaded = true;
-
-      addModuleLabel(placeholder, mod);
-      // ── ADD VISIBLE HOT PLATE CHUCK (HMDS warm chamber) ──
-      addWaferChuck(placeholder, 'hotplate');
-      positionWaferAnchorAboveChuck(placeholder, root);
-
-      if (onReady) onReady(placeholder);
-    },
-    undefined,
-    (err: any) => console.error('PR Coat GLB failed to load:', err)
-  );
-
-  return placeholder;
-}
-
-
-function buildScannerGLB(
-  scene: THREE.Scene,
-  mod: ProcessStep,
-  onReady?: (group: THREE.Group) => void
-): THREE.Group {
-  const placeholder = new THREE.Group();
-  placeholder.position.set(mod.x, 0, mod.z);
-  placeholder.userData.id = mod.id;
-  scene.add(placeholder);
-
-  const loader = new GLTFLoader();
-  loader.load(
-    '/scaner.glb',
-    (gltf: any) => {
-      const root = gltf.scene as THREE.Group;
-
-      const tempBox = new THREE.Box3().setFromObject(root);
-      const size = new THREE.Vector3();
-      tempBox.getSize(size);
-
-      // Scanner is bigger — target 4.1 wide to match procedural housing
-      const targetW = 12;
-      const currentMax = Math.max(size.x, size.z);
-      const scale = targetW / currentMax;
-      root.scale.setScalar(scale);
-
-      const box = new THREE.Box3().setFromObject(root);
-      const SCANNER_FLOOR_DROP = 1.5;   // ← increase to sink the scanner lower
-      root.position.y = 0 - box.min.y - SCANNER_FLOOR_DROP;
-      root.updateWorldMatrix(true, true);
-      const rootWorldBox = new THREE.Box3().setFromObject(root);
-
-      // Compute front Z excluding Floor and Cassette_Body (which are hidden later)
-      const rootBoxFilter = new THREE.Box3();
-      let hasValidMesh = false;
-      root.traverse((obj) => {
-        if ((obj as THREE.Mesh).isMesh) {
-          const name = obj.name;
-          if (name !== 'Floor' && name !== 'Cassette_Body' && name !== 'Cube.001') {
-            rootBoxFilter.expandByObject(obj);
-            hasValidMesh = true;
-          }
-        }
-      });
-      const scannerFrontZ  = hasValidMesh ? rootBoxFilter.max.z : rootWorldBox.max.z;
-      const scannerBackZ   = hasValidMesh ? rootBoxFilter.min.z : rootWorldBox.min.z;
-      const scannerCenterZ = (scannerFrontZ + scannerBackZ) / 2;
-
-      // ════════════════════════════════════════════════════════════════
-      // DIRECT SLOT POSITION OFFSETS (local Z, measured from body center)
-      // Body center is GUARANTEED inside the scanner. Add a small +/- to
-      // slide the wafer toward whichever face is the opening.
-      //   • Wafer too far FORWARD / poking out → make SCANNER_SLOT_OFFSET
-      //     MORE NEGATIVE (e.g. -1, -2) to pull it back into the body.
-      //   • Wafer buried / want it nearer the opening → make it more positive.
-      // ════════════════════════════════════════════════════════════════
-      const SCANNER_SLOT_OFFSET   = -100.8;   // ← wafer rest depth from center
-      const SCANNER_PICKUP_OFFSET = 1.0;   // ← pickup point, relative to slot (toward opening)
-
-      const scannerSlotZ   = scannerCenterZ + SCANNER_SLOT_OFFSET;
-      const scannerTunnelZ = scannerSlotZ + SCANNER_PICKUP_OFFSET * 0.5;
-      const scannerPickupZ = scannerSlotZ + SCANNER_PICKUP_OFFSET;
-
-      console.log('[SCANNER] center=', scannerCenterZ.toFixed(2),
-        'slotZ=', scannerSlotZ.toFixed(2),
-        'depth=', (scannerFrontZ - scannerBackZ).toFixed(2));
-
-      const namedParts: Record<string, THREE.Object3D> = {};
-      root.traverse((obj) => {
-        namedParts[obj.name] = obj;
-        if ((obj as THREE.Mesh).isMesh) {
-          obj.castShadow = false;
-          obj.receiveShadow = true;
-        }
-        if (obj.name.startsWith('Dot_6_2')) {
-          obj.visible = false;
-        }
-      });
-
-      console.log('ALL Scanner GLB nodes:', Object.keys(namedParts));
-      console.log('[SCANNER] frontZ=', scannerFrontZ.toFixed(3), 'pickupZ=', scannerPickupZ.toFixed(3), 'slotZ=', scannerSlotZ.toFixed(3));
-
-      // ── HIDE BACKSIDE PLATES + floating top panels ──
-      [
-        'Vent_Panel', 'Base_Louvre_0', 'Base_Louvre_1', 'Base_Louvre_2', 'Base_Louvre_3', 'Base_Louvre_4',
-        'Top', 'Top_Panel', 'TopPanel', 'Top_Cover', 'TopCover', 'Lid', 'Cover',
-        'Top_Plate', 'TopPlate', 'Roof', 'Hood', 'Cap', 'Upper_Panel', 'UpperPanel',
-        'Top_Housing', 'TopHousing', 'Top_Shell', 'TopShell',
-        'Stage_Slab', 'Cassette_Body', 'Cube.001', 'Floor',
-        'Btn_0', 'Btn_1', 'Handle_-0.28', 'Handle_0.28',
-        // Hide back-side slot elements
-        'BackSlot', 'Back_Slot', 'RearSlot', 'Rear_Slot', 'SlotBack', 'Slot_Back',
-        'BackOpening', 'Back_Opening', 'RearOpening', 'Rear_Opening',
-      ].forEach((name) => {
-        if (namedParts[name]) namedParts[name].visible = false;
-      });
-
-      // Also hide any slot-like geometry on the back (-Z side)
-      root.traverse((obj) => {
-        if (!(obj as THREE.Mesh).isMesh) return;
-        const mesh = obj as THREE.Mesh;
-        const name = obj.name.toLowerCase();
-
-        // Hide any object with "slot", "opening", "port" in its name that isn't the main one
-        if ((name.includes('slot') || name.includes('opening') || name.includes('port')) &&
-          !name.includes('anchor')) {
-          const worldPos = new THREE.Vector3();
-          mesh.getWorldPosition(worldPos);
-
-          // If it's on the back (-Z) side relative to the scanner front, hide it
-          if (worldPos.z < scannerFrontZ - 5) {
-            mesh.visible = false;
-          }
-        }
-      });
-
-      // Also hide any mesh that is very flat (thin in Y) and positioned high — catches unnamed floating plates
-      root.traverse((obj) => {
-        if (!(obj as THREE.Mesh).isMesh) return;
-        const mesh = obj as THREE.Mesh;
-        const geo = mesh.geometry;
-        if (!geo.boundingBox) geo.computeBoundingBox();
-        const bb = geo.boundingBox!;
-        const worldPos = new THREE.Vector3();
-        mesh.getWorldPosition(worldPos);
-        const sizeY = (bb.max.y - bb.min.y) * mesh.getWorldScale(new THREE.Vector3()).y;
-        const sizeX = (bb.max.x - bb.min.x) * mesh.getWorldScale(new THREE.Vector3()).x;
-        const sizeZ = (bb.max.z - bb.min.z) * mesh.getWorldScale(new THREE.Vector3()).z;
-        // A "floating plate": very thin in Y, wide in X and Z, positioned above y=3
-        if (sizeY < 0.5 && sizeX > 3 && sizeZ > 3 && worldPos.y > 3) {
-          mesh.visible = false;
-        }
-      });
-
-      // Try to find UV lens / beam emitter (NOT 'Top' — that's the cover panel)
-      const lens =
-        namedParts['Lens'] || namedParts['UVLens'] || namedParts['Beam'] ||
-        namedParts['Emitter'];
-
-      // Indicator lights
-      const lightGreen =
-        namedParts['LightGreen'] || namedParts['Light_Green'] || namedParts['LED_Green'];
-      const lightRed =
-        namedParts['LightRed'] || namedParts['Light_Red'] || namedParts['LED_Red'];
-
-      // Magenta/UV scheme for scanner
-      // Line ~45
-      const scheme = { base: 0x1a1400, emissive: 0xffcc00, light: 0xffdd00, pl: 0xffaa00 };
-
-      if (lens && (lens as THREE.Mesh).isMesh) {
-        const lensMat = new THREE.MeshStandardMaterial({
-          color: scheme.base,
-          emissive: scheme.emissive,
-          emissiveIntensity: 2.5,
-          roughness: 0.05,
-          metalness: 0.7,
-        });
-        (lens as THREE.Mesh).material = lensMat;
-        placeholder.userData.lensMaterial = lensMat;
-        placeholder.userData.colorScheme = scheme;
-      }
-
-      if (lightGreen && (lightGreen as THREE.Mesh).isMesh) {
-        const greenMat = new THREE.MeshStandardMaterial({
-          color: 0x002200, emissive: 0x00ff44, emissiveIntensity: 4.0, roughness: 0.4,
-        });
-        (lightGreen as THREE.Mesh).material = greenMat;
-        placeholder.userData.greenLight = greenMat;
-      }
-
-      if (lightRed && (lightRed as THREE.Mesh).isMesh) {
-        const redMat = new THREE.MeshStandardMaterial({
-          color: 0x220000, emissive: 0xff0033, emissiveIntensity: 1.0, roughness: 0.4,
-        });
-        (lightRed as THREE.Mesh).material = redMat;
-        placeholder.userData.redLight = redMat;
-      }
-
-      // UV beam cone (synthetic — placed even if GLB has no beam mesh)
-      const beam = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.06, 0.32, 2.2, 20, 1, true),
-        new THREE.MeshStandardMaterial({
-          color: 0xffcc00, emissive: 0xffaa00, emissiveIntensity: 2.2,
-          transparent: true, opacity: 0.12, side: THREE.DoubleSide, depthWrite: false,
-        })
-      );
-      beam.position.set(0, 1.1, 0);
-      root.add(beam);
-      placeholder.userData.uvBeam = beam;
-
-      // Explicit scanner port pickup point (front opening / interface).
-      const scannerPickupAnchor = new THREE.Group();
-      scannerPickupAnchor.name = "ScannerPickupPoint";
-      scannerPickupAnchor.position.set(0, WAFER_TRANSFER_Y, scannerPickupZ);
-      placeholder.add(scannerPickupAnchor);
-      placeholder.userData.pickupAnchor = scannerPickupAnchor;
-
-      const pl = new THREE.PointLight(scheme.pl, 0, 10);
-      pl.position.set(0, 2.0, 0);
-      root.add(pl);
-      placeholder.userData.processLight = pl;
-
-      //   placeholder.add(root);
-      //   placeholder.userData.glbRoot = root;
-      //   placeholder.userData.loaded = true;
-
-
-      // ── RECTANGULAR WAFER SLOT on front face of scanner ──
-      const SLOT_W = 1.8;   // ← width of slot opening
-      const SLOT_H = 0.25;  // ← height of slot opening  
-      const SLOT_D = 0;   // ← depth of slot tunnel
-
-      // Slot tunnel (dark interior — gives depth illusion)
-      const slotTunnel = new THREE.Mesh(
-        new THREE.BoxGeometry(SLOT_W, SLOT_H, SLOT_D),
-        new THREE.MeshStandardMaterial({
-          color: 0x050508,
-          roughness: 0.9,
-          metalness: 0.1,
-          emissive: 0x000510,
-          emissiveIntensity: 0.5,
-        })
-      );
-      slotTunnel.position.set(0, WAFER_TRANSFER_Y, scannerTunnelZ);
-      placeholder.add(slotTunnel);
-
-      // Slot frame — metallic border around opening
-      const slotFrameMat = new THREE.MeshStandardMaterial({
-        color: 0x778899,
-        roughness: 0.15,
-        metalness: 0.95,
-        emissive: 0xffcc00,
-        emissiveIntensity: 0.15,
-      });
-
-      // Top border
-      const slotTop = new THREE.Mesh(
-        new THREE.BoxGeometry(SLOT_W + 0.15, 0.06, 0.06),
-        slotFrameMat
-      );
-      slotTop.position.set(0, WAFER_TRANSFER_Y + SLOT_H / 2 + 0.03, scannerSlotZ);
-      placeholder.add(slotTop);
-
-      // Bottom border
-      const slotBot = new THREE.Mesh(
-        new THREE.BoxGeometry(SLOT_W + 0.15, 0.06, 0.06),
-        slotFrameMat.clone()
-      );
-      slotBot.position.set(0, WAFER_TRANSFER_Y - SLOT_H / 2 - 0.03, scannerSlotZ);
-      placeholder.add(slotBot);
-
-      // Left border
-      const slotLeft = new THREE.Mesh(
-        new THREE.BoxGeometry(0.06, SLOT_H + 0.12, 0.06),
-        slotFrameMat.clone()
-      );
-      slotLeft.position.set(-SLOT_W / 2 - 0.03, WAFER_TRANSFER_Y, scannerSlotZ);
-      placeholder.add(slotLeft);
-
-      // Right border
-      const slotRight = new THREE.Mesh(
-        new THREE.BoxGeometry(0.06, SLOT_H + 0.12, 0.06),
-        slotFrameMat.clone()
-      );
-      slotRight.position.set(SLOT_W / 2 + 0.03, WAFER_TRANSFER_Y, scannerSlotZ);
-      placeholder.add(slotRight);
-
-      // Slot glow strip inside (yellow indicator light)
-      const slotGlow = new THREE.Mesh(
-        new THREE.BoxGeometry(SLOT_W - 0.1, 0.02, 0.02),
-        new THREE.MeshStandardMaterial({
-          color: 0xffcc00,
-          emissive: 0xffcc00,
-          emissiveIntensity: 3.0,
-          roughness: 0.3,
-        })
-      );
-      slotGlow.position.set(0, WAFER_TRANSFER_Y - SLOT_H / 2 + 0.02, scannerSlotZ);
-      placeholder.add(slotGlow);
-      placeholder.userData.slotGlow = slotGlow;
-
-      // Sensor dots on each side of slot
-      const sensorMat = new THREE.MeshStandardMaterial({
-        color: 0x00ff88,
-        emissive: 0x00ff88,
-        emissiveIntensity: 4.0,
-        roughness: 0.3,
-      });
-      [-SLOT_W / 2 - 0.15, SLOT_W / 2 + 0.15].forEach((sx) => {
-        const sensor = new THREE.Mesh(
-          new THREE.SphereGeometry(0.04, 8, 8),
-          sensorMat.clone()
-        );
-        sensor.position.set(sx, WAFER_TRANSFER_Y, scannerSlotZ);
-        placeholder.add(sensor);
-      });
-
-      // ── WAFER PICKUP ANCHOR inside the slot — Y matches global transfer height ──
-      const scannerSlotAnchor = new THREE.Group();
-      scannerSlotAnchor.name = "ScannerSlotAnchor";
-      scannerSlotAnchor.position.set(0, WAFER_TRANSFER_Y, scannerSlotZ);
-      placeholder.add(scannerSlotAnchor);
-      placeholder.userData.slotAnchor = scannerSlotAnchor;
-
-      placeholder.add(root);
-      placeholder.userData.glbRoot = root;
-      placeholder.userData.loaded = true;
-      // Update keep-out box once the GLB is present (prevents TCP entering scanner).
-      placeholder.userData._bbox = new THREE.Box3().setFromObject(placeholder).expandByScalar(0.15);
-
-      // Wafer anchor at the computed slot position (nameplate added below).
-      const scannerWaferAnchor = new THREE.Group();
-      scannerWaferAnchor.name = "ModuleWaferAnchor";
-      scannerWaferAnchor.position.set(0, WAFER_TRANSFER_Y, scannerSlotZ);
-      placeholder.add(scannerWaferAnchor);
-      placeholder.userData.waferAnchor = scannerWaferAnchor;
-
-      // ── Scanner front-face nameplate (parented to placeholder in local space) ──
-      (() => {
-        const CW = 1024, CH = 300;
-        const nc = document.createElement('canvas');
-        nc.width = CW; nc.height = CH;
-        const ctx = nc.getContext('2d')!;
-
-        const metalGrad = ctx.createLinearGradient(0, 0, 0, CH);
-        metalGrad.addColorStop(0, '#dde2e8');
-        metalGrad.addColorStop(0.12, '#f0f4f7');
-        metalGrad.addColorStop(0.45, '#c8ced4');
-        metalGrad.addColorStop(0.88, '#e4e8ec');
-        metalGrad.addColorStop(1, '#adb4bc');
-        ctx.fillStyle = metalGrad;
-        ctx.fillRect(0, 0, CW, CH);
-
-        ctx.globalAlpha = 0.045;
-        ctx.strokeStyle = '#ffffff';
-        ctx.lineWidth = 1;
-        for (let y = 2; y < CH; y += 3) {
-          ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(CW, y); ctx.stroke();
-        }
-        ctx.globalAlpha = 1;
-
-        // Bevels
-        ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, CW, 7); ctx.fillRect(0, 0, 7, CH);
-        ctx.fillStyle = '#555c64'; ctx.fillRect(0, CH - 7, CW, 7); ctx.fillRect(CW - 7, 0, 7, CH);
-
-        const innerGrad = ctx.createLinearGradient(0, 12, 0, CH - 12);
-        innerGrad.addColorStop(0, '#b0b8c0');
-        innerGrad.addColorStop(0.25, '#d0d8de');
-        innerGrad.addColorStop(0.75, '#c8d0d6');
-        innerGrad.addColorStop(1, '#a0a8b0');
-        ctx.fillStyle = innerGrad;
-        ctx.fillRect(11, 11, CW - 22, CH - 22);
-
-        // Color accent stripe (scanner is magenta/ee00cc)
-        ctx.fillStyle = `rgb(238,0,204)`;
-        ctx.fillRect(11, 11, 14, CH - 22);
-        ctx.fillStyle = 'rgba(255,255,255,0.5)';
-        ctx.fillRect(11, 11, 5, CH - 22);
-
-        // Short code
-        ctx.font = "bold 120px 'Arial Black', Arial, sans-serif";
-        ctx.textAlign = 'left';
-        ctx.textBaseline = 'alphabetic';
-        ctx.fillStyle = 'rgba(0,0,0,0.45)'; ctx.fillText('SCAN', 48, 168);
-        ctx.fillStyle = 'rgba(255,255,255,0.65)'; ctx.fillText('SCAN', 46, 166);
-        ctx.fillStyle = '#1a2028'; ctx.fillText('SCAN', 47, 167);
-
-        // Full name
-        ctx.font = "bold 44px Arial, sans-serif";
-        ctx.fillStyle = 'rgba(0,0,0,0.4)'; ctx.fillText('Scanner 193nm Exposure', 48, 234);
-        ctx.fillStyle = '#1a2030'; ctx.fillText('Scanner 193nm Exposure', 47, 233);
-
-        // Rivets
-        const drawRivet = (rx: number, ry: number) => {
-          ctx.fillStyle = 'rgba(0,0,0,0.3)';
-          ctx.beginPath(); ctx.arc(rx + 2, ry + 2, 10, 0, Math.PI * 2); ctx.fill();
-          const rg = ctx.createRadialGradient(rx - 3, ry - 3, 0, rx, ry, 10);
-          rg.addColorStop(0, '#eef2f6'); rg.addColorStop(0.4, '#a8b0b8'); rg.addColorStop(1, '#707880');
-          ctx.fillStyle = rg;
-          ctx.beginPath(); ctx.arc(rx, ry, 10, 0, Math.PI * 2); ctx.fill();
-        };
-        drawRivet(28, 28); drawRivet(CW - 28, 28); drawRivet(28, CH - 28); drawRivet(CW - 28, CH - 28);
-
-        const tex = new THREE.CanvasTexture(nc);
-        tex.minFilter = THREE.LinearFilter;
-        tex.magFilter = THREE.LinearFilter;
-        tex.anisotropy = 8;
-
-        const plate = new THREE.Mesh(
-          new THREE.PlaneGeometry(2.8, 1.25),
-          new THREE.MeshBasicMaterial({
-            map: tex, transparent: false,
-            depthTest: true, depthWrite: true,
-            side: THREE.DoubleSide,
-            polygonOffset: true,
-            polygonOffsetFactor: -2,
-            polygonOffsetUnits: -2,
-          })
-        );
-
-        // ── -X face: flush on hull, centered on visible body (exclude hidden floor/cassette) ──
-        root.updateWorldMatrix(true, true);
-        const bodyBox = new THREE.Box3();
-        let hasBodyBox = false;
-        root.traverse((obj) => {
-          if (!(obj as THREE.Mesh).isMesh || !obj.visible) return;
-          const n = obj.name;
-          if (n === 'Floor' || n === 'Cassette_Body' || n === 'Cube.001') return;
-          bodyBox.expandByObject(obj);
-          hasBodyBox = true;
-        });
-        const bounds = hasBodyBox ? bodyBox : new THREE.Box3().setFromObject(root);
-        const px = placeholder.position.x;
-        const py = placeholder.position.y;
-        const pz = placeholder.position.z;
-        const localMinX = bounds.min.x - px;
-        const localMinY = bounds.min.y - py;
-        const localMaxY = bounds.max.y - py;
-        const localMinZ = bounds.min.z - pz;
-        const localMaxZ = bounds.max.z - pz;
-        const PLATE_FLUSH = 0.04;
-        const PLATE_X = localMinX - PLATE_FLUSH;
-        const PLATE_Y = (localMinY + localMaxY) * 0.5;
-        const PLATE_Z = (localMinZ + localMaxZ) * 0.5;
-        plate.position.set(PLATE_X, PLATE_Y, PLATE_Z);
-        plate.rotation.set(0, -Math.PI / 2, 0);
-        plate.renderOrder = 100;
-        placeholder.add(plate);
-
-        console.log('[SCANNER NAMEPLATE] faceX=', PLATE_X.toFixed(2),
-          'centerY=', PLATE_Y.toFixed(2), 'centerZ=', PLATE_Z.toFixed(2));
-      })();
-
-      if (onReady) onReady(placeholder);
-    },
-    undefined,
-    (err: any) => console.error('Scanner GLB failed:', err)
-  );
-
-  return placeholder;
-}
-
-
-
-
-function buildChillPlateGLB(
-  scene: THREE.Scene,
-  mod: ProcessStep,
-  onReady?: (group: THREE.Group) => void
-): THREE.Group {
-  const placeholder = new THREE.Group();
-  placeholder.position.set(mod.x, 0, mod.z);
-  placeholder.userData.id = mod.id;
-  scene.add(placeholder);
-
-  const loader = new GLTFLoader();
-  loader.load(
-    '/Chill_plate.glb',
-    (gltf: any) => {
-      const root = gltf.scene as THREE.Group;
-
-      const tempBox = new THREE.Box3().setFromObject(root);
-      const size = new THREE.Vector3();
-      tempBox.getSize(size);
-
-      const targetW = 6.0;
-      const currentMax = Math.max(size.x, size.z);
-      const scale = targetW / currentMax;
-      root.scale.setScalar(scale);
-
-      const box = new THREE.Box3().setFromObject(root);
-      root.position.y = PLINTH_TOP_Y - box.min.y;
-
-      const namedParts: Record<string, THREE.Object3D> = {};
-      root.traverse((obj) => {
-        namedParts[obj.name] = obj;
-        if ((obj as THREE.Mesh).isMesh) {
-          obj.castShadow = true;
-          obj.receiveShadow = true;
-        }
-      });
-
-      console.log(`Chill plate GLB (${mod.id}) nodes:`, Object.keys(namedParts).slice(0, 30));
-
-      // Try to find the cold plate surface
-      const plate =
-        namedParts['ChillPlate'] || namedParts['Chill_Plate'] ||
-        namedParts['ColdPlate'] || namedParts['Plate'] || namedParts['Top'];
-
-      // Cooling fins (optional)
-      const fins =
-        namedParts['Fins'] || namedParts['CoolFins'] || namedParts['Cooler'];
-
-      const lightGreen =
-        namedParts['LightGreen'] || namedParts['Light_Green'] || namedParts['LED_Green'];
-      const lightRed =
-        namedParts['LightRed'] || namedParts['Light_Red'] || namedParts['LED_Red'];
-
-      // Cold blue scheme
-      const scheme = { base: 0x030d1c, emissive: 0x0099ff, light: 0x00ccff, pl: 0x00aaff };
-
-      if (plate && (plate as THREE.Mesh).isMesh) {
-        const plateMat = new THREE.MeshStandardMaterial({
-          color: 0x0a1828,
-          emissive: scheme.emissive,
-          emissiveIntensity: 0.6,
-          roughness: 0.18,
-          metalness: 0.92,
-        });
-        (plate as THREE.Mesh).material = plateMat;
-        placeholder.userData.plateMaterial = plateMat;
-        placeholder.userData.colorScheme = scheme;
-      }
-
-      if (fins && (fins as THREE.Mesh).isMesh) {
-        const finMat = new THREE.MeshStandardMaterial({
-          color: 0x1c2e44, roughness: 0.16, metalness: 0.97,
-          emissive: 0x0055cc, emissiveIntensity: 0.6,
-        });
-        (fins as THREE.Mesh).material = finMat;
-        placeholder.userData.finMaterial = finMat;
-      }
-
-      if (lightGreen && (lightGreen as THREE.Mesh).isMesh) {
-        const greenMat = new THREE.MeshStandardMaterial({
-          color: 0x002200, emissive: 0x00ff44, emissiveIntensity: 4.0, roughness: 0.4,
-        });
-        (lightGreen as THREE.Mesh).material = greenMat;
-        placeholder.userData.greenLight = greenMat;
-      }
-
-      if (lightRed && (lightRed as THREE.Mesh).isMesh) {
-        const redMat = new THREE.MeshStandardMaterial({
-          color: 0x220000, emissive: 0xff0033, emissiveIntensity: 1.0, roughness: 0.4,
-        });
-        (lightRed as THREE.Mesh).material = redMat;
-        placeholder.userData.redLight = redMat;
-      }
-
-      const pl = new THREE.PointLight(scheme.pl, 0, 6);
-      pl.position.set(0, 1.2, 0);
-      root.add(pl);
-      placeholder.userData.processLight = pl;
-
-      placeholder.add(root);
-      placeholder.userData.glbRoot = root;
-      placeholder.userData.loaded = true;
-
-
-      addModuleLabel(placeholder, mod);
-      addWaferChuck(placeholder, 'chill');
-
-      positionWaferAnchorAboveChuck(placeholder, root);
-
-      if (onReady) onReady(placeholder);
-    },
-    undefined,
-    (err: any) => console.error(`Chill plate GLB (${mod.id}) failed:`, err)
-  );
-
-  return placeholder;
-}
+// ===== GLB-REMOVED (buildDehydrationGLB - /dehydration.glb (dead)) - re-wire the new module here. See GLB_WIRING_CONTRACT.md =====
+// function buildDehydrationGLB(
+//   scene: THREE.Scene,
+//   mod: ProcessStep,
+//   onReady?: (group: THREE.Group) => void
+// ): THREE.Group {
+//   const placeholder = new THREE.Group();
+//   placeholder.position.set(mod.x, 0, mod.z);
+//   placeholder.userData.id = mod.id;
+//   scene.add(placeholder);
+// 
+// (async () => { const { GLTFLoader } = await import('three/examples/jsm/loaders/GLTFLoader.js'); const loader = new GLTFLoader();
+//   loader.load(
+//     '/dehydration.glb',
+//     (gltf: any) => {
+//       const root = gltf.scene as THREE.Group;
+// 
+//       const tempBox = new THREE.Box3().setFromObject(root);
+//       const size = new THREE.Vector3();
+//       tempBox.getSize(size);
+// 
+//       const targetW = 6;
+//       const currentMax = Math.max(size.x, size.z);
+//       const scale = targetW / currentMax;
+//       root.scale.setScalar(scale);
+// 
+//       const box = new THREE.Box3().setFromObject(root);
+//       root.position.y = PLINTH_TOP_Y - box.min.y;
+// 
+//       const namedParts: Record<string, THREE.Object3D> = {};
+//       root.traverse((obj) => {
+//         namedParts[obj.name] = obj;
+//         if ((obj as THREE.Mesh).isMesh) {
+//           obj.castShadow = true;
+//           obj.receiveShadow = true;
+//         }
+//       });
+// 
+//       const hotPlate =
+//         namedParts['HotPlate'] ||
+//         namedParts['Hot_Plate'] ||
+//         namedParts['Plate'] ||
+//         namedParts['Heater'] ||
+//         namedParts['Top'];
+// 
+//       const lightGreen =
+//         namedParts['LightGreen'] || namedParts['Light_Green'] || namedParts['LED_Green'];
+//       const lightRed =
+//         namedParts['LightRed'] || namedParts['Light_Red'] || namedParts['LED_Red'];
+// 
+//       const colorScheme: Record<string, { base: number; emissive: number; light: number; pl: number }> = {
+//         dehy: { base: 0x4a2a15, emissive: 0xff6622, light: 0xff6622, pl: 0xff5500 },
+//         pab: { base: 0x5a1505, emissive: 0xff3322, light: 0xff2233, pl: 0xff2200 },
+//         hardbake: { base: 0x4a1808, emissive: 0xff4422, light: 0xff3300, pl: 0xff3300 },
+//       };
+//       const scheme = colorScheme[mod.id] ?? colorScheme.dehy;
+// 
+//       if (hotPlate && (hotPlate as THREE.Mesh).isMesh) {
+//         const heatMat = new THREE.MeshStandardMaterial({
+//           color: scheme.base,
+//           emissive: scheme.emissive,
+//           emissiveIntensity: 1.8,
+//           roughness: 0.45,
+//           metalness: 0.5,
+//         });
+//         (hotPlate as THREE.Mesh).material = heatMat;
+//         placeholder.userData.heatMaterial = heatMat;
+//         placeholder.userData.colorScheme = scheme;
+//       }
+// 
+//       if (lightGreen && (lightGreen as THREE.Mesh).isMesh) {
+//         const greenMat = new THREE.MeshStandardMaterial({
+//           color: 0x002200, emissive: 0x00ff44, emissiveIntensity: 4.0, roughness: 0.4,
+//         });
+//         (lightGreen as THREE.Mesh).material = greenMat;
+//         placeholder.userData.greenLight = greenMat;
+//       }
+// 
+//       if (lightRed && (lightRed as THREE.Mesh).isMesh) {
+//         const redMat = new THREE.MeshStandardMaterial({
+//           color: 0x220000, emissive: 0xff0033, emissiveIntensity: 1.0, roughness: 0.4,
+//         });
+//         (lightRed as THREE.Mesh).material = redMat;
+//         placeholder.userData.redLight = redMat;
+//       }
+// 
+//       const pl = new THREE.PointLight(0xff5500, 0, 6);
+//       pl.position.set(0, 1.2, 0);
+//       root.add(pl);
+//       placeholder.userData.processLight = pl;
+// 
+//       placeholder.add(root);
+//       placeholder.userData.glbRoot = root;
+//       placeholder.userData.loaded = true;
+// 
+//       addModuleLabel(placeholder, mod);
+//       // ── ADD VISIBLE HOT PLATE CHUCK (force on top of GLB body) ──
+//       // Chuck is already positioned correctly by addWaferChuck - no override needed
+//       positionWaferAnchorAboveChuck(placeholder, root);
+// 
+//       if (onReady) onReady(placeholder);
+//     },
+//     undefined,
+//     (err: any) => {
+//       console.error('Dehydration GLB failed to load:', err);
+//     }
+//   );
+// })();
+// 
+//   return placeholder;
+// }
+
+
+
+// ===== GLB-REMOVED (buildHardBakeGLB - /hardbakeglb.glb (dead)) - re-wire the new module here. See GLB_WIRING_CONTRACT.md =====
+// function buildHardBakeGLB(
+//   scene: THREE.Scene,
+//   mod: ProcessStep,
+//   onReady?: (group: THREE.Group) => void
+// ): THREE.Group {
+//   const placeholder = new THREE.Group();
+//   placeholder.position.set(mod.x, 0, mod.z);
+//   placeholder.userData.id = mod.id;
+//   scene.add(placeholder);
+// 
+// (async () => { const { GLTFLoader } = await import('three/examples/jsm/loaders/GLTFLoader.js'); const loader = new GLTFLoader();
+//   loader.load(
+//   '/hardbakeglb.glb',
+//   (gltf: any) => {
+//     const root = gltf.scene as THREE.Group;
+// 
+//     // ── NEW: rotate the model to align with the plinth before measuring/centering ──
+//     root.rotation.y = Math.PI;   // try Math.PI/2, -Math.PI/2, or Math.PI — see which squares it up
+// 
+//     const tempBox = new THREE.Box3().setFromObject(root);
+//     const size = new THREE.Vector3();
+//     tempBox.getSize(size);
+// 
+//     const targetW = 4;
+//     const currentMax = Math.max(size.x, size.z);
+//     const scale = targetW / currentMax;
+//     root.scale.setScalar(scale);
+// 
+//     const box = new THREE.Box3().setFromObject(root);
+//     root.position.y = PLINTH_TOP_Y - box.min.y;
+//     const afterBox = new THREE.Box3().setFromObject(root);
+// const afterCenter = new THREE.Vector3();
+// afterBox.getCenter(afterCenter);
+// root.position.x -= afterCenter.x;
+// root.position.z -= afterCenter.z;   // ← ADD THIS LINE (was previously skipped)
+// 
+//       // ── NEW: record real half-depth so nameplates can sit flush against this GLB's actual front face ──
+//       const finalBox = new THREE.Box3().setFromObject(root);
+//       placeholder.userData.halfDepth = (finalBox.max.z - finalBox.min.z) / 2;
+// 
+//       const namedParts: Record<string, THREE.Object3D> = {};
+//       root.traverse((obj) => {
+//         namedParts[obj.name] = obj;
+//         if ((obj as THREE.Mesh).isMesh) {
+//           obj.castShadow = true;
+//           obj.receiveShadow = true;
+//         }
+//       });
+// 
+//       const hotPlate =
+//         namedParts['HotPlate'] || namedParts['Hot_Plate'] ||
+//         namedParts['Plate'] || namedParts['Heater'] || namedParts['Top'];
+// 
+//       const lightGreen =
+//         namedParts['LightGreen'] || namedParts['Light_Green'] || namedParts['LED_Green'];
+//       const lightRed =
+//         namedParts['LightRed'] || namedParts['Light_Red'] || namedParts['LED_Red'];
+// 
+//       const scheme = { base: 0x4a1808, emissive: 0xff4422, light: 0xff3300, pl: 0xff3300 };
+// 
+//       if (hotPlate && (hotPlate as THREE.Mesh).isMesh) {
+//         const heatMat = new THREE.MeshStandardMaterial({
+//           color: scheme.base,
+//           emissive: scheme.emissive,
+//           emissiveIntensity: 2.2,
+//           roughness: 0.45,
+//           metalness: 0.5,
+//         });
+//         (hotPlate as THREE.Mesh).material = heatMat;
+//         placeholder.userData.heatMaterial = heatMat;
+//         placeholder.userData.colorScheme = scheme;
+//       }
+// 
+//       if (lightGreen && (lightGreen as THREE.Mesh).isMesh) {
+//         const greenMat = new THREE.MeshStandardMaterial({
+//           color: 0x002200, emissive: 0x00ff44, emissiveIntensity: 4.0, roughness: 0.4,
+//         });
+//         (lightGreen as THREE.Mesh).material = greenMat;
+//         placeholder.userData.greenLight = greenMat;
+//       }
+// 
+//       if (lightRed && (lightRed as THREE.Mesh).isMesh) {
+//         const redMat = new THREE.MeshStandardMaterial({
+//           color: 0x220000, emissive: 0xff0033, emissiveIntensity: 1.0, roughness: 0.4,
+//         });
+//         (lightRed as THREE.Mesh).material = redMat;
+//         placeholder.userData.redLight = redMat;
+//       }
+// 
+//       const pl = new THREE.PointLight(scheme.pl, 0, 7);
+//       pl.position.set(0, 1.2, 0);
+//       root.add(pl);
+//       placeholder.userData.processLight = pl;
+// 
+//       placeholder.add(root);
+//       placeholder.userData.glbRoot = root;
+//       placeholder.userData.loaded = true;
+// 
+//       addModuleLabel(placeholder, mod);
+// 
+//       // ── NO chuck added here — the GLB already has its own hotplate surface
+//       // ── Just set the wafer anchor so robot knows where to place the wafer
+//       positionWaferAnchorAboveChuck(placeholder, root);
+// 
+//       if (onReady) onReady(placeholder);
+//     },
+//     undefined,
+//     (err: any) => console.error('HardBake GLB failed to load:', err)
+//   );})();
+// 
+//   return placeholder;
+// }
+
+
+
+
+
+// ===== GLB-REMOVED (buildPrCoatGLB - /PRCoat.glb (dead)) - re-wire the new module here. See GLB_WIRING_CONTRACT.md =====
+// function buildPrCoatGLB(
+//   scene: THREE.Scene,
+//   mod: ProcessStep,
+//   onReady?: (group: THREE.Group) => void
+// ): THREE.Group {
+//   const placeholder = new THREE.Group();
+//   placeholder.position.set(mod.x, 0, mod.z);
+//   placeholder.userData.id = mod.id;
+//   scene.add(placeholder);
+// 
+//   const loader = new GLTFLoader();
+//   loader.load(
+//     '/PRCoat.glb',
+//     (gltf: any) => {
+//       const root = gltf.scene as THREE.Group;
+// 
+//       const tempBox = new THREE.Box3().setFromObject(root);
+//       const size = new THREE.Vector3();
+//       tempBox.getSize(size);
+// 
+//       const targetW = 3;
+//       const currentMax = Math.max(size.x, size.z);
+//       const scale = targetW / currentMax;
+//       root.scale.setScalar(scale);
+// 
+//       const box = new THREE.Box3().setFromObject(root);
+//       root.position.y = PLINTH_TOP_Y - box.min.y;
+// 
+//       const namedParts: Record<string, THREE.Object3D> = {};
+//       root.traverse((obj) => {
+//         namedParts[obj.name] = obj;
+//         if ((obj as THREE.Mesh).isMesh) {
+//           obj.castShadow = true;
+//           obj.receiveShadow = true;
+//         }
+//       });
+// 
+//       const spinChuck =
+//         namedParts['SpinChuck'] || namedParts['Spin_Chuck'] ||
+//         namedParts['Chuck'] || namedParts['Spinner'] ||
+//         namedParts['HotPlate'] || namedParts['Plate'] ||
+//         namedParts['Top'];
+// 
+//       const dispenseArm =
+//         namedParts['DispenseArm'] || namedParts['Dispense_Arm'] ||
+//         namedParts['Arm'] || namedParts['NozzleArm'];
+// 
+//       const lightGreen =
+//         namedParts['LightGreen'] || namedParts['Light_Green'] || namedParts['LED_Green'];
+//       const lightRed =
+//         namedParts['LightRed'] || namedParts['Light_Red'] || namedParts['LED_Red'];
+// 
+//       const scheme = { base: 0x180a28, emissive: 0xcc00ff, light: 0xee44ff, pl: 0xcc00ff };
+// 
+//       if (spinChuck && (spinChuck as THREE.Mesh).isMesh) {
+//         const chuckMat = new THREE.MeshStandardMaterial({
+//           color: 0x445566,
+//           emissive: scheme.emissive,
+//           emissiveIntensity: 0.3,
+//           roughness: 0.15,
+//           metalness: 0.92,
+//         });
+//         (spinChuck as THREE.Mesh).material = chuckMat;
+//         placeholder.userData.chuckMaterial = chuckMat;
+//         placeholder.userData.spinChuck = spinChuck;
+//         placeholder.userData.colorScheme = scheme;
+//       }
+// 
+//       if (dispenseArm) {
+//         placeholder.userData.dispenseArm = dispenseArm;
+//         placeholder.userData.armRestY = (dispenseArm as THREE.Object3D).rotation.y;
+//       }
+// 
+//       if (lightGreen && (lightGreen as THREE.Mesh).isMesh) {
+//         const greenMat = new THREE.MeshStandardMaterial({
+//           color: 0x002200, emissive: 0x00ff44, emissiveIntensity: 4.0, roughness: 0.4,
+//         });
+//         (lightGreen as THREE.Mesh).material = greenMat;
+//         placeholder.userData.greenLight = greenMat;
+//       }
+// 
+//       if (lightRed && (lightRed as THREE.Mesh).isMesh) {
+//         const redMat = new THREE.MeshStandardMaterial({
+//           color: 0x220000, emissive: 0xff0033, emissiveIntensity: 1.0, roughness: 0.4,
+//         });
+//         (lightRed as THREE.Mesh).material = redMat;
+//         placeholder.userData.redLight = redMat;
+//       }
+// 
+//       const pl = new THREE.PointLight(scheme.pl, 0, 7);
+//       pl.position.set(0, 1.2, 0);
+//       root.add(pl);
+//       placeholder.userData.processLight = pl;
+// 
+//       placeholder.add(root);
+//       placeholder.userData.glbRoot = root;
+//       placeholder.userData.loaded = true;
+// 
+//       addModuleLabel(placeholder, mod);
+//       // ── ADD VISIBLE HOT PLATE CHUCK (HMDS warm chamber) ──
+//       addWaferChuck(placeholder, 'hotplate');
+//       positionWaferAnchorAboveChuck(placeholder, root);
+// 
+//       if (onReady) onReady(placeholder);
+//     },
+//     undefined,
+//     (err: any) => console.error('PR Coat GLB failed to load:', err)
+//   );
+// 
+//   return placeholder;
+// }
+
+
+// ===== GLB-REMOVED (buildScannerGLB - /scaner.glb (dead)) - re-wire the new module here. See GLB_WIRING_CONTRACT.md =====
+// function buildScannerGLB(
+//   scene: THREE.Scene,
+//   mod: ProcessStep,
+//   onReady?: (group: THREE.Group) => void
+// ): THREE.Group {
+//   const placeholder = new THREE.Group();
+//   placeholder.position.set(mod.x, 0, mod.z);
+//   placeholder.userData.id = mod.id;
+//   scene.add(placeholder);
+// 
+//   const loader = new GLTFLoader();
+//   loader.load(
+//     '/scaner.glb',
+//     (gltf: any) => {
+//       const root = gltf.scene as THREE.Group;
+// 
+//       const tempBox = new THREE.Box3().setFromObject(root);
+//       const size = new THREE.Vector3();
+//       tempBox.getSize(size);
+// 
+//       // Scanner is bigger — target 4.1 wide to match procedural housing
+//       const targetW = 12;
+//       const currentMax = Math.max(size.x, size.z);
+//       const scale = targetW / currentMax;
+//       root.scale.setScalar(scale);
+// 
+//       const box = new THREE.Box3().setFromObject(root);
+//       const SCANNER_FLOOR_DROP = 1.5;   // ← increase to sink the scanner lower
+//       root.position.y = 0 - box.min.y - SCANNER_FLOOR_DROP;
+//       root.updateWorldMatrix(true, true);
+//       const rootWorldBox = new THREE.Box3().setFromObject(root);
+// 
+//       // Compute front Z excluding Floor and Cassette_Body (which are hidden later)
+//       const rootBoxFilter = new THREE.Box3();
+//       let hasValidMesh = false;
+//       root.traverse((obj) => {
+//         if ((obj as THREE.Mesh).isMesh) {
+//           const name = obj.name;
+//           if (name !== 'Floor' && name !== 'Cassette_Body' && name !== 'Cube.001') {
+//             rootBoxFilter.expandByObject(obj);
+//             hasValidMesh = true;
+//           }
+//         }
+//       });
+//       const scannerFrontZ  = hasValidMesh ? rootBoxFilter.max.z : rootWorldBox.max.z;
+//       const scannerBackZ   = hasValidMesh ? rootBoxFilter.min.z : rootWorldBox.min.z;
+//       const scannerCenterZ = (scannerFrontZ + scannerBackZ) / 2;
+// 
+//       // ════════════════════════════════════════════════════════════════
+//       // DIRECT SLOT POSITION OFFSETS (local Z, measured from body center)
+//       // Body center is GUARANTEED inside the scanner. Add a small +/- to
+//       // slide the wafer toward whichever face is the opening.
+//       //   • Wafer too far FORWARD / poking out → make SCANNER_SLOT_OFFSET
+//       //     MORE NEGATIVE (e.g. -1, -2) to pull it back into the body.
+//       //   • Wafer buried / want it nearer the opening → make it more positive.
+//       // ════════════════════════════════════════════════════════════════
+//       const SCANNER_SLOT_OFFSET   = -100.8;   // ← wafer rest depth from center
+//       const SCANNER_PICKUP_OFFSET = 1.0;   // ← pickup point, relative to slot (toward opening)
+// 
+//       const scannerSlotZ   = scannerCenterZ + SCANNER_SLOT_OFFSET;
+//       const scannerTunnelZ = scannerSlotZ + SCANNER_PICKUP_OFFSET * 0.5;
+//       const scannerPickupZ = scannerSlotZ + SCANNER_PICKUP_OFFSET;
+// 
+//       console.log('[SCANNER] center=', scannerCenterZ.toFixed(2),
+//         'slotZ=', scannerSlotZ.toFixed(2),
+//         'depth=', (scannerFrontZ - scannerBackZ).toFixed(2));
+// 
+//       const namedParts: Record<string, THREE.Object3D> = {};
+//       root.traverse((obj) => {
+//         namedParts[obj.name] = obj;
+//         if ((obj as THREE.Mesh).isMesh) {
+//           obj.castShadow = false;
+//           obj.receiveShadow = true;
+//         }
+//         if (obj.name.startsWith('Dot_6_2')) {
+//           obj.visible = false;
+//         }
+//       });
+// 
+//       console.log('ALL Scanner GLB nodes:', Object.keys(namedParts));
+//       console.log('[SCANNER] frontZ=', scannerFrontZ.toFixed(3), 'pickupZ=', scannerPickupZ.toFixed(3), 'slotZ=', scannerSlotZ.toFixed(3));
+// 
+//       // ── HIDE BACKSIDE PLATES + floating top panels ──
+//       [
+//         'Vent_Panel', 'Base_Louvre_0', 'Base_Louvre_1', 'Base_Louvre_2', 'Base_Louvre_3', 'Base_Louvre_4',
+//         'Top', 'Top_Panel', 'TopPanel', 'Top_Cover', 'TopCover', 'Lid', 'Cover',
+//         'Top_Plate', 'TopPlate', 'Roof', 'Hood', 'Cap', 'Upper_Panel', 'UpperPanel',
+//         'Top_Housing', 'TopHousing', 'Top_Shell', 'TopShell',
+//         'Stage_Slab', 'Cassette_Body', 'Cube.001', 'Floor',
+//         'Btn_0', 'Btn_1', 'Handle_-0.28', 'Handle_0.28',
+//         // Hide back-side slot elements
+//         'BackSlot', 'Back_Slot', 'RearSlot', 'Rear_Slot', 'SlotBack', 'Slot_Back',
+//         'BackOpening', 'Back_Opening', 'RearOpening', 'Rear_Opening',
+//       ].forEach((name) => {
+//         if (namedParts[name]) namedParts[name].visible = false;
+//       });
+// 
+//       // Also hide any slot-like geometry on the back (-Z side)
+//       root.traverse((obj) => {
+//         if (!(obj as THREE.Mesh).isMesh) return;
+//         const mesh = obj as THREE.Mesh;
+//         const name = obj.name.toLowerCase();
+// 
+//         // Hide any object with "slot", "opening", "port" in its name that isn't the main one
+//         if ((name.includes('slot') || name.includes('opening') || name.includes('port')) &&
+//           !name.includes('anchor')) {
+//           const worldPos = new THREE.Vector3();
+//           mesh.getWorldPosition(worldPos);
+// 
+//           // If it's on the back (-Z) side relative to the scanner front, hide it
+//           if (worldPos.z < scannerFrontZ - 5) {
+//             mesh.visible = false;
+//           }
+//         }
+//       });
+// 
+//       // Also hide any mesh that is very flat (thin in Y) and positioned high — catches unnamed floating plates
+//       root.traverse((obj) => {
+//         if (!(obj as THREE.Mesh).isMesh) return;
+//         const mesh = obj as THREE.Mesh;
+//         const geo = mesh.geometry;
+//         if (!geo.boundingBox) geo.computeBoundingBox();
+//         const bb = geo.boundingBox!;
+//         const worldPos = new THREE.Vector3();
+//         mesh.getWorldPosition(worldPos);
+//         const sizeY = (bb.max.y - bb.min.y) * mesh.getWorldScale(new THREE.Vector3()).y;
+//         const sizeX = (bb.max.x - bb.min.x) * mesh.getWorldScale(new THREE.Vector3()).x;
+//         const sizeZ = (bb.max.z - bb.min.z) * mesh.getWorldScale(new THREE.Vector3()).z;
+//         // A "floating plate": very thin in Y, wide in X and Z, positioned above y=3
+//         if (sizeY < 0.5 && sizeX > 3 && sizeZ > 3 && worldPos.y > 3) {
+//           mesh.visible = false;
+//         }
+//       });
+// 
+//       // Try to find UV lens / beam emitter (NOT 'Top' — that's the cover panel)
+//       const lens =
+//         namedParts['Lens'] || namedParts['UVLens'] || namedParts['Beam'] ||
+//         namedParts['Emitter'];
+// 
+//       // Indicator lights
+//       const lightGreen =
+//         namedParts['LightGreen'] || namedParts['Light_Green'] || namedParts['LED_Green'];
+//       const lightRed =
+//         namedParts['LightRed'] || namedParts['Light_Red'] || namedParts['LED_Red'];
+// 
+//       // Magenta/UV scheme for scanner
+//       // Line ~45
+//       const scheme = { base: 0x1a1400, emissive: 0xffcc00, light: 0xffdd00, pl: 0xffaa00 };
+// 
+//       if (lens && (lens as THREE.Mesh).isMesh) {
+//         const lensMat = new THREE.MeshStandardMaterial({
+//           color: scheme.base,
+//           emissive: scheme.emissive,
+//           emissiveIntensity: 2.5,
+//           roughness: 0.05,
+//           metalness: 0.7,
+//         });
+//         (lens as THREE.Mesh).material = lensMat;
+//         placeholder.userData.lensMaterial = lensMat;
+//         placeholder.userData.colorScheme = scheme;
+//       }
+// 
+//       if (lightGreen && (lightGreen as THREE.Mesh).isMesh) {
+//         const greenMat = new THREE.MeshStandardMaterial({
+//           color: 0x002200, emissive: 0x00ff44, emissiveIntensity: 4.0, roughness: 0.4,
+//         });
+//         (lightGreen as THREE.Mesh).material = greenMat;
+//         placeholder.userData.greenLight = greenMat;
+//       }
+// 
+//       if (lightRed && (lightRed as THREE.Mesh).isMesh) {
+//         const redMat = new THREE.MeshStandardMaterial({
+//           color: 0x220000, emissive: 0xff0033, emissiveIntensity: 1.0, roughness: 0.4,
+//         });
+//         (lightRed as THREE.Mesh).material = redMat;
+//         placeholder.userData.redLight = redMat;
+//       }
+// 
+//       // UV beam cone (synthetic — placed even if GLB has no beam mesh)
+//       const beam = new THREE.Mesh(
+//         new THREE.CylinderGeometry(0.06, 0.32, 2.2, 20, 1, true),
+//         new THREE.MeshStandardMaterial({
+//           color: 0xffcc00, emissive: 0xffaa00, emissiveIntensity: 2.2,
+//           transparent: true, opacity: 0.12, side: THREE.DoubleSide, depthWrite: false,
+//         })
+//       );
+//       beam.position.set(0, 1.1, 0);
+//       root.add(beam);
+//       placeholder.userData.uvBeam = beam;
+// 
+//       // Explicit scanner port pickup point (front opening / interface).
+//       const scannerPickupAnchor = new THREE.Group();
+//       scannerPickupAnchor.name = "ScannerPickupPoint";
+//       scannerPickupAnchor.position.set(0, WAFER_TRANSFER_Y, scannerPickupZ);
+//       placeholder.add(scannerPickupAnchor);
+//       placeholder.userData.pickupAnchor = scannerPickupAnchor;
+// 
+//       const pl = new THREE.PointLight(scheme.pl, 0, 10);
+//       pl.position.set(0, 2.0, 0);
+//       root.add(pl);
+//       placeholder.userData.processLight = pl;
+// 
+//       //   placeholder.add(root);
+//       //   placeholder.userData.glbRoot = root;
+//       //   placeholder.userData.loaded = true;
+// 
+// 
+//       // ── RECTANGULAR WAFER SLOT on front face of scanner ──
+//       const SLOT_W = 1.8;   // ← width of slot opening
+//       const SLOT_H = 0.25;  // ← height of slot opening  
+//       const SLOT_D = 0;   // ← depth of slot tunnel
+// 
+//       // Slot tunnel (dark interior — gives depth illusion)
+//       const slotTunnel = new THREE.Mesh(
+//         new THREE.BoxGeometry(SLOT_W, SLOT_H, SLOT_D),
+//         new THREE.MeshStandardMaterial({
+//           color: 0x050508,
+//           roughness: 0.9,
+//           metalness: 0.1,
+//           emissive: 0x000510,
+//           emissiveIntensity: 0.5,
+//         })
+//       );
+//       slotTunnel.position.set(0, WAFER_TRANSFER_Y, scannerTunnelZ);
+//       placeholder.add(slotTunnel);
+// 
+//       // Slot frame — metallic border around opening
+//       const slotFrameMat = new THREE.MeshStandardMaterial({
+//         color: 0x778899,
+//         roughness: 0.15,
+//         metalness: 0.95,
+//         emissive: 0xffcc00,
+//         emissiveIntensity: 0.15,
+//       });
+// 
+//       // Top border
+//       const slotTop = new THREE.Mesh(
+//         new THREE.BoxGeometry(SLOT_W + 0.15, 0.06, 0.06),
+//         slotFrameMat
+//       );
+//       slotTop.position.set(0, WAFER_TRANSFER_Y + SLOT_H / 2 + 0.03, scannerSlotZ);
+//       placeholder.add(slotTop);
+// 
+//       // Bottom border
+//       const slotBot = new THREE.Mesh(
+//         new THREE.BoxGeometry(SLOT_W + 0.15, 0.06, 0.06),
+//         slotFrameMat.clone()
+//       );
+//       slotBot.position.set(0, WAFER_TRANSFER_Y - SLOT_H / 2 - 0.03, scannerSlotZ);
+//       placeholder.add(slotBot);
+// 
+//       // Left border
+//       const slotLeft = new THREE.Mesh(
+//         new THREE.BoxGeometry(0.06, SLOT_H + 0.12, 0.06),
+//         slotFrameMat.clone()
+//       );
+//       slotLeft.position.set(-SLOT_W / 2 - 0.03, WAFER_TRANSFER_Y, scannerSlotZ);
+//       placeholder.add(slotLeft);
+// 
+//       // Right border
+//       const slotRight = new THREE.Mesh(
+//         new THREE.BoxGeometry(0.06, SLOT_H + 0.12, 0.06),
+//         slotFrameMat.clone()
+//       );
+//       slotRight.position.set(SLOT_W / 2 + 0.03, WAFER_TRANSFER_Y, scannerSlotZ);
+//       placeholder.add(slotRight);
+// 
+//       // Slot glow strip inside (yellow indicator light)
+//       const slotGlow = new THREE.Mesh(
+//         new THREE.BoxGeometry(SLOT_W - 0.1, 0.02, 0.02),
+//         new THREE.MeshStandardMaterial({
+//           color: 0xffcc00,
+//           emissive: 0xffcc00,
+//           emissiveIntensity: 3.0,
+//           roughness: 0.3,
+//         })
+//       );
+//       slotGlow.position.set(0, WAFER_TRANSFER_Y - SLOT_H / 2 + 0.02, scannerSlotZ);
+//       placeholder.add(slotGlow);
+//       placeholder.userData.slotGlow = slotGlow;
+// 
+//       // Sensor dots on each side of slot
+//       const sensorMat = new THREE.MeshStandardMaterial({
+//         color: 0x00ff88,
+//         emissive: 0x00ff88,
+//         emissiveIntensity: 4.0,
+//         roughness: 0.3,
+//       });
+//       [-SLOT_W / 2 - 0.15, SLOT_W / 2 + 0.15].forEach((sx) => {
+//         const sensor = new THREE.Mesh(
+//           new THREE.SphereGeometry(0.04, 8, 8),
+//           sensorMat.clone()
+//         );
+//         sensor.position.set(sx, WAFER_TRANSFER_Y, scannerSlotZ);
+//         placeholder.add(sensor);
+//       });
+// 
+//       // ── WAFER PICKUP ANCHOR inside the slot — Y matches global transfer height ──
+//       const scannerSlotAnchor = new THREE.Group();
+//       scannerSlotAnchor.name = "ScannerSlotAnchor";
+//       scannerSlotAnchor.position.set(0, WAFER_TRANSFER_Y, scannerSlotZ);
+//       placeholder.add(scannerSlotAnchor);
+//       placeholder.userData.slotAnchor = scannerSlotAnchor;
+// 
+//       placeholder.add(root);
+//       placeholder.userData.glbRoot = root;
+//       placeholder.userData.loaded = true;
+//       // Update keep-out box once the GLB is present (prevents TCP entering scanner).
+//       placeholder.userData._bbox = new THREE.Box3().setFromObject(placeholder).expandByScalar(0.15);
+// 
+//       // Wafer anchor at the computed slot position (nameplate added below).
+//       const scannerWaferAnchor = new THREE.Group();
+//       scannerWaferAnchor.name = "ModuleWaferAnchor";
+//       scannerWaferAnchor.position.set(0, WAFER_TRANSFER_Y, scannerSlotZ);
+//       placeholder.add(scannerWaferAnchor);
+//       placeholder.userData.waferAnchor = scannerWaferAnchor;
+// 
+//       // ── Scanner front-face nameplate (parented to placeholder in local space) ──
+//       (() => {
+//         const CW = 1024, CH = 300;
+//         const nc = document.createElement('canvas');
+//         nc.width = CW; nc.height = CH;
+//         const ctx = nc.getContext('2d')!;
+// 
+//         const metalGrad = ctx.createLinearGradient(0, 0, 0, CH);
+//         metalGrad.addColorStop(0, '#dde2e8');
+//         metalGrad.addColorStop(0.12, '#f0f4f7');
+//         metalGrad.addColorStop(0.45, '#c8ced4');
+//         metalGrad.addColorStop(0.88, '#e4e8ec');
+//         metalGrad.addColorStop(1, '#adb4bc');
+//         ctx.fillStyle = metalGrad;
+//         ctx.fillRect(0, 0, CW, CH);
+// 
+//         ctx.globalAlpha = 0.045;
+//         ctx.strokeStyle = '#ffffff';
+//         ctx.lineWidth = 1;
+//         for (let y = 2; y < CH; y += 3) {
+//           ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(CW, y); ctx.stroke();
+//         }
+//         ctx.globalAlpha = 1;
+// 
+//         // Bevels
+//         ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, CW, 7); ctx.fillRect(0, 0, 7, CH);
+//         ctx.fillStyle = '#555c64'; ctx.fillRect(0, CH - 7, CW, 7); ctx.fillRect(CW - 7, 0, 7, CH);
+// 
+//         const innerGrad = ctx.createLinearGradient(0, 12, 0, CH - 12);
+//         innerGrad.addColorStop(0, '#b0b8c0');
+//         innerGrad.addColorStop(0.25, '#d0d8de');
+//         innerGrad.addColorStop(0.75, '#c8d0d6');
+//         innerGrad.addColorStop(1, '#a0a8b0');
+//         ctx.fillStyle = innerGrad;
+//         ctx.fillRect(11, 11, CW - 22, CH - 22);
+// 
+//         // Color accent stripe (scanner is magenta/ee00cc)
+//         ctx.fillStyle = `rgb(238,0,204)`;
+//         ctx.fillRect(11, 11, 14, CH - 22);
+//         ctx.fillStyle = 'rgba(255,255,255,0.5)';
+//         ctx.fillRect(11, 11, 5, CH - 22);
+// 
+//         // Short code
+//         ctx.font = "bold 120px 'Arial Black', Arial, sans-serif";
+//         ctx.textAlign = 'left';
+//         ctx.textBaseline = 'alphabetic';
+//         ctx.fillStyle = 'rgba(0,0,0,0.45)'; ctx.fillText('SCAN', 48, 168);
+//         ctx.fillStyle = 'rgba(255,255,255,0.65)'; ctx.fillText('SCAN', 46, 166);
+//         ctx.fillStyle = '#1a2028'; ctx.fillText('SCAN', 47, 167);
+// 
+//         // Full name
+//         ctx.font = "bold 44px Arial, sans-serif";
+//         ctx.fillStyle = 'rgba(0,0,0,0.4)'; ctx.fillText('Scanner 193nm Exposure', 48, 234);
+//         ctx.fillStyle = '#1a2030'; ctx.fillText('Scanner 193nm Exposure', 47, 233);
+// 
+//         // Rivets
+//         const drawRivet = (rx: number, ry: number) => {
+//           ctx.fillStyle = 'rgba(0,0,0,0.3)';
+//           ctx.beginPath(); ctx.arc(rx + 2, ry + 2, 10, 0, Math.PI * 2); ctx.fill();
+//           const rg = ctx.createRadialGradient(rx - 3, ry - 3, 0, rx, ry, 10);
+//           rg.addColorStop(0, '#eef2f6'); rg.addColorStop(0.4, '#a8b0b8'); rg.addColorStop(1, '#707880');
+//           ctx.fillStyle = rg;
+//           ctx.beginPath(); ctx.arc(rx, ry, 10, 0, Math.PI * 2); ctx.fill();
+//         };
+//         drawRivet(28, 28); drawRivet(CW - 28, 28); drawRivet(28, CH - 28); drawRivet(CW - 28, CH - 28);
+// 
+//         const tex = new THREE.CanvasTexture(nc);
+//         tex.minFilter = THREE.LinearFilter;
+//         tex.magFilter = THREE.LinearFilter;
+//         tex.anisotropy = 8;
+// 
+//         const plate = new THREE.Mesh(
+//           new THREE.PlaneGeometry(2.8, 1.25),
+//           new THREE.MeshBasicMaterial({
+//             map: tex, transparent: false,
+//             depthTest: true, depthWrite: true,
+//             side: THREE.DoubleSide,
+//             polygonOffset: true,
+//             polygonOffsetFactor: -2,
+//             polygonOffsetUnits: -2,
+//           })
+//         );
+// 
+//         // ── -X face: flush on hull, centered on visible body (exclude hidden floor/cassette) ──
+//         root.updateWorldMatrix(true, true);
+//         const bodyBox = new THREE.Box3();
+//         let hasBodyBox = false;
+//         root.traverse((obj) => {
+//           if (!(obj as THREE.Mesh).isMesh || !obj.visible) return;
+//           const n = obj.name;
+//           if (n === 'Floor' || n === 'Cassette_Body' || n === 'Cube.001') return;
+//           bodyBox.expandByObject(obj);
+//           hasBodyBox = true;
+//         });
+//         const bounds = hasBodyBox ? bodyBox : new THREE.Box3().setFromObject(root);
+//         const px = placeholder.position.x;
+//         const py = placeholder.position.y;
+//         const pz = placeholder.position.z;
+//         const localMinX = bounds.min.x - px;
+//         const localMinY = bounds.min.y - py;
+//         const localMaxY = bounds.max.y - py;
+//         const localMinZ = bounds.min.z - pz;
+//         const localMaxZ = bounds.max.z - pz;
+//         const PLATE_FLUSH = 0.04;
+//         const PLATE_X = localMinX - PLATE_FLUSH;
+//         const PLATE_Y = (localMinY + localMaxY) * 0.5;
+//         const PLATE_Z = (localMinZ + localMaxZ) * 0.5;
+//         plate.position.set(PLATE_X, PLATE_Y, PLATE_Z);
+//         plate.rotation.set(0, -Math.PI / 2, 0);
+//         plate.renderOrder = 100;
+//         placeholder.add(plate);
+// 
+//         console.log('[SCANNER NAMEPLATE] faceX=', PLATE_X.toFixed(2),
+//           'centerY=', PLATE_Y.toFixed(2), 'centerZ=', PLATE_Z.toFixed(2));
+//       })();
+// 
+//       if (onReady) onReady(placeholder);
+//     },
+//     undefined,
+//     (err: any) => console.error('Scanner GLB failed:', err)
+//   );
+// 
+//   return placeholder;
+// }
+
+
+
+
+// ===== GLB-REMOVED (buildChillPlateGLB - /Chill_plate.glb (dead)) - re-wire the new module here. See GLB_WIRING_CONTRACT.md =====
+// function buildChillPlateGLB(
+//   scene: THREE.Scene,
+//   mod: ProcessStep,
+//   onReady?: (group: THREE.Group) => void
+// ): THREE.Group {
+//   const placeholder = new THREE.Group();
+//   placeholder.position.set(mod.x, 0, mod.z);
+//   placeholder.userData.id = mod.id;
+//   scene.add(placeholder);
+// 
+//   const loader = new GLTFLoader();
+//   loader.load(
+//     '/Chill_plate.glb',
+//     (gltf: any) => {
+//       const root = gltf.scene as THREE.Group;
+// 
+//       const tempBox = new THREE.Box3().setFromObject(root);
+//       const size = new THREE.Vector3();
+//       tempBox.getSize(size);
+// 
+//       const targetW = 6.0;
+//       const currentMax = Math.max(size.x, size.z);
+//       const scale = targetW / currentMax;
+//       root.scale.setScalar(scale);
+// 
+//       const box = new THREE.Box3().setFromObject(root);
+//       root.position.y = PLINTH_TOP_Y - box.min.y;
+// 
+//       const namedParts: Record<string, THREE.Object3D> = {};
+//       root.traverse((obj) => {
+//         namedParts[obj.name] = obj;
+//         if ((obj as THREE.Mesh).isMesh) {
+//           obj.castShadow = true;
+//           obj.receiveShadow = true;
+//         }
+//       });
+// 
+//       console.log(`Chill plate GLB (${mod.id}) nodes:`, Object.keys(namedParts).slice(0, 30));
+// 
+//       // Try to find the cold plate surface
+//       const plate =
+//         namedParts['ChillPlate'] || namedParts['Chill_Plate'] ||
+//         namedParts['ColdPlate'] || namedParts['Plate'] || namedParts['Top'];
+// 
+//       // Cooling fins (optional)
+//       const fins =
+//         namedParts['Fins'] || namedParts['CoolFins'] || namedParts['Cooler'];
+// 
+//       const lightGreen =
+//         namedParts['LightGreen'] || namedParts['Light_Green'] || namedParts['LED_Green'];
+//       const lightRed =
+//         namedParts['LightRed'] || namedParts['Light_Red'] || namedParts['LED_Red'];
+// 
+//       // Cold blue scheme
+//       const scheme = { base: 0x030d1c, emissive: 0x0099ff, light: 0x00ccff, pl: 0x00aaff };
+// 
+//       if (plate && (plate as THREE.Mesh).isMesh) {
+//         const plateMat = new THREE.MeshStandardMaterial({
+//           color: 0x0a1828,
+//           emissive: scheme.emissive,
+//           emissiveIntensity: 0.6,
+//           roughness: 0.18,
+//           metalness: 0.92,
+//         });
+//         (plate as THREE.Mesh).material = plateMat;
+//         placeholder.userData.plateMaterial = plateMat;
+//         placeholder.userData.colorScheme = scheme;
+//       }
+// 
+//       if (fins && (fins as THREE.Mesh).isMesh) {
+//         const finMat = new THREE.MeshStandardMaterial({
+//           color: 0x1c2e44, roughness: 0.16, metalness: 0.97,
+//           emissive: 0x0055cc, emissiveIntensity: 0.6,
+//         });
+//         (fins as THREE.Mesh).material = finMat;
+//         placeholder.userData.finMaterial = finMat;
+//       }
+// 
+//       if (lightGreen && (lightGreen as THREE.Mesh).isMesh) {
+//         const greenMat = new THREE.MeshStandardMaterial({
+//           color: 0x002200, emissive: 0x00ff44, emissiveIntensity: 4.0, roughness: 0.4,
+//         });
+//         (lightGreen as THREE.Mesh).material = greenMat;
+//         placeholder.userData.greenLight = greenMat;
+//       }
+// 
+//       if (lightRed && (lightRed as THREE.Mesh).isMesh) {
+//         const redMat = new THREE.MeshStandardMaterial({
+//           color: 0x220000, emissive: 0xff0033, emissiveIntensity: 1.0, roughness: 0.4,
+//         });
+//         (lightRed as THREE.Mesh).material = redMat;
+//         placeholder.userData.redLight = redMat;
+//       }
+// 
+//       const pl = new THREE.PointLight(scheme.pl, 0, 6);
+//       pl.position.set(0, 1.2, 0);
+//       root.add(pl);
+//       placeholder.userData.processLight = pl;
+// 
+//       placeholder.add(root);
+//       placeholder.userData.glbRoot = root;
+//       placeholder.userData.loaded = true;
+// 
+// 
+//       addModuleLabel(placeholder, mod);
+//       addWaferChuck(placeholder, 'chill');
+// 
+//       positionWaferAnchorAboveChuck(placeholder, root);
+// 
+//       if (onReady) onReady(placeholder);
+//     },
+//     undefined,
+//     (err: any) => console.error(`Chill plate GLB (${mod.id}) failed:`, err)
+//   );
+// 
+//   return placeholder;
+// }
 
 
 // function buildHMDSGLB(
@@ -6295,226 +6430,228 @@ function buildChillPlateGLB(
 // }
 
 
-function buildHMDSGLB(
-  scene: THREE.Scene,
-  mod: ProcessStep,
-  onReady?: (group: THREE.Group) => void
-): THREE.Group {
-  const placeholder = new THREE.Group();
-  placeholder.position.set(mod.x, 0, mod.z);
-  placeholder.userData.id = mod.id;
-  scene.add(placeholder);
+// ===== GLB-REMOVED (buildHMDSGLB - /HMDS Vapour.glb (dead)) - re-wire the new module here. See GLB_WIRING_CONTRACT.md =====
+// function buildHMDSGLB(
+//   scene: THREE.Scene,
+//   mod: ProcessStep,
+//   onReady?: (group: THREE.Group) => void
+// ): THREE.Group {
+//   const placeholder = new THREE.Group();
+//   placeholder.position.set(mod.x, 0, mod.z);
+//   placeholder.userData.id = mod.id;
+//   scene.add(placeholder);
+// 
+//   const loader = new GLTFLoader();
+//   loader.load(
+//     '/HMDS Vapour.glb',
+//     (gltf: any) => {
+//       const root = gltf.scene as THREE.Group;
+// 
+//       const tempBox = new THREE.Box3().setFromObject(root);
+//       const size = new THREE.Vector3();
+//       tempBox.getSize(size);
+// 
+//       const targetW = 2.5;
+//       const currentMax = Math.max(size.x, size.z);
+//       const scale = targetW / currentMax;
+//       root.scale.setScalar(scale);
+//       // root.scale.y = scale * 0.01;
+// 
+//       // ── ROTATE 180° to match other modules' orientation ──
+//       root.rotation.y = Math.PI;
+// 
+//       const box = new THREE.Box3().setFromObject(root);
+//       // Seat GLB flush on plinth top surface
+//       root.position.y = PLINTH_TOP_Y - box.min.y;
+// 
+//       // ── Recenter X and Z after rotation (rotation shifts pivot) ──
+//       const afterBox = new THREE.Box3().setFromObject(root);
+//       const afterCenter = new THREE.Vector3();
+//       afterBox.getCenter(afterCenter);
+//       root.position.x -= afterCenter.x;
+//       root.position.z -= afterCenter.z;
+// 
+//       const namedParts: Record<string, THREE.Object3D> = {};
+//       root.traverse((obj) => {
+//         namedParts[obj.name] = obj;
+//         if ((obj as THREE.Mesh).isMesh) {
+//           obj.castShadow = true;
+//           obj.receiveShadow = true;
+//         }
+//       });
+// 
+//       const chamber =
+//         namedParts['Chamber'] || namedParts['Vessel'] ||
+//         namedParts['Body'] || namedParts['Top'] || namedParts['Plate'];
+// 
+//       const lightGreen =
+//         namedParts['LightGreen'] || namedParts['Light_Green'] || namedParts['LED_Green'];
+//       const lightRed =
+//         namedParts['LightRed'] || namedParts['Light_Red'] || namedParts['LED_Red'];
+// 
+//       const scheme = { base: 0x1a0a00, emissive: 0xff8800, light: 0xffaa33, pl: 0xff7700 };
+// 
+//       if (chamber && (chamber as THREE.Mesh).isMesh) {
+//         const chamberMat = new THREE.MeshStandardMaterial({
+//           color: scheme.base,
+//           emissive: scheme.emissive,
+//           emissiveIntensity: 0.6,
+//           roughness: 0.25,
+//           metalness: 0.85,
+//         });
+//         (chamber as THREE.Mesh).material = chamberMat;
+//         placeholder.userData.chamberMaterial = chamberMat;
+//         placeholder.userData.colorScheme = scheme;
+//       }
+// 
+//       if (lightGreen && (lightGreen as THREE.Mesh).isMesh) {
+//         const greenMat = new THREE.MeshStandardMaterial({
+//           color: 0x002200, emissive: 0x00ff44, emissiveIntensity: 4.0, roughness: 0.4,
+//         });
+//         (lightGreen as THREE.Mesh).material = greenMat;
+//         placeholder.userData.greenLight = greenMat;
+//       }
+// 
+//       if (lightRed && (lightRed as THREE.Mesh).isMesh) {
+//         const redMat = new THREE.MeshStandardMaterial({
+//           color: 0x220000, emissive: 0xff0033, emissiveIntensity: 1.0, roughness: 0.4,
+//         });
+//         (lightRed as THREE.Mesh).material = redMat;
+//         placeholder.userData.redLight = redMat;
+//       }
+// 
+//       const pl = new THREE.PointLight(scheme.pl, 0, 7);
+//       pl.position.set(0, 1.5, 0);
+//       root.add(pl);
+//       placeholder.userData.processLight = pl;
+// 
+//       placeholder.add(root);
+//       placeholder.userData.glbRoot = root;
+//       placeholder.userData.loaded = true;
+// 
+//       addModuleLabel(placeholder, mod);
+//       // ── ADD VISIBLE SPIN CHUCK ──
+//       addWaferChuck(placeholder, 'spin');
+//       positionWaferAnchorAboveChuck(placeholder, root);
+// 
+//       if (onReady) onReady(placeholder);
+//     },
+//     undefined,
+//     (err: any) => console.error('HMDS GLB failed:', err)
+//   );
+// 
+//   return placeholder;
+// }
 
-  const loader = new GLTFLoader();
-  loader.load(
-    '/HMDS Vapour.glb',
-    (gltf: any) => {
-      const root = gltf.scene as THREE.Group;
 
-      const tempBox = new THREE.Box3().setFromObject(root);
-      const size = new THREE.Vector3();
-      tempBox.getSize(size);
-
-      const targetW = 2.5;
-      const currentMax = Math.max(size.x, size.z);
-      const scale = targetW / currentMax;
-      root.scale.setScalar(scale);
-      // root.scale.y = scale * 0.01;
-
-      // ── ROTATE 180° to match other modules' orientation ──
-      root.rotation.y = Math.PI;
-
-      const box = new THREE.Box3().setFromObject(root);
-      // Seat GLB flush on plinth top surface
-      root.position.y = PLINTH_TOP_Y - box.min.y;
-
-      // ── Recenter X and Z after rotation (rotation shifts pivot) ──
-      const afterBox = new THREE.Box3().setFromObject(root);
-      const afterCenter = new THREE.Vector3();
-      afterBox.getCenter(afterCenter);
-      root.position.x -= afterCenter.x;
-      root.position.z -= afterCenter.z;
-
-      const namedParts: Record<string, THREE.Object3D> = {};
-      root.traverse((obj) => {
-        namedParts[obj.name] = obj;
-        if ((obj as THREE.Mesh).isMesh) {
-          obj.castShadow = true;
-          obj.receiveShadow = true;
-        }
-      });
-
-      const chamber =
-        namedParts['Chamber'] || namedParts['Vessel'] ||
-        namedParts['Body'] || namedParts['Top'] || namedParts['Plate'];
-
-      const lightGreen =
-        namedParts['LightGreen'] || namedParts['Light_Green'] || namedParts['LED_Green'];
-      const lightRed =
-        namedParts['LightRed'] || namedParts['Light_Red'] || namedParts['LED_Red'];
-
-      const scheme = { base: 0x1a0a00, emissive: 0xff8800, light: 0xffaa33, pl: 0xff7700 };
-
-      if (chamber && (chamber as THREE.Mesh).isMesh) {
-        const chamberMat = new THREE.MeshStandardMaterial({
-          color: scheme.base,
-          emissive: scheme.emissive,
-          emissiveIntensity: 0.6,
-          roughness: 0.25,
-          metalness: 0.85,
-        });
-        (chamber as THREE.Mesh).material = chamberMat;
-        placeholder.userData.chamberMaterial = chamberMat;
-        placeholder.userData.colorScheme = scheme;
-      }
-
-      if (lightGreen && (lightGreen as THREE.Mesh).isMesh) {
-        const greenMat = new THREE.MeshStandardMaterial({
-          color: 0x002200, emissive: 0x00ff44, emissiveIntensity: 4.0, roughness: 0.4,
-        });
-        (lightGreen as THREE.Mesh).material = greenMat;
-        placeholder.userData.greenLight = greenMat;
-      }
-
-      if (lightRed && (lightRed as THREE.Mesh).isMesh) {
-        const redMat = new THREE.MeshStandardMaterial({
-          color: 0x220000, emissive: 0xff0033, emissiveIntensity: 1.0, roughness: 0.4,
-        });
-        (lightRed as THREE.Mesh).material = redMat;
-        placeholder.userData.redLight = redMat;
-      }
-
-      const pl = new THREE.PointLight(scheme.pl, 0, 7);
-      pl.position.set(0, 1.5, 0);
-      root.add(pl);
-      placeholder.userData.processLight = pl;
-
-      placeholder.add(root);
-      placeholder.userData.glbRoot = root;
-      placeholder.userData.loaded = true;
-
-      addModuleLabel(placeholder, mod);
-      // ── ADD VISIBLE SPIN CHUCK ──
-      addWaferChuck(placeholder, 'spin');
-      positionWaferAnchorAboveChuck(placeholder, root);
-
-      if (onReady) onReady(placeholder);
-    },
-    undefined,
-    (err: any) => console.error('HMDS GLB failed:', err)
-  );
-
-  return placeholder;
-}
-
-
-function buildPostBakeGLB(
-  scene: THREE.Scene,
-  mod: ProcessStep,
-  onReady?: (group: THREE.Group) => void
-): THREE.Group {
-  const placeholder = new THREE.Group();
-  placeholder.position.set(mod.x, 0, mod.z);
-  placeholder.userData.id = mod.id;
-  scene.add(placeholder);
-
-(async () => { const { GLTFLoader } = await import('three/examples/jsm/loaders/GLTFLoader.js'); const loader = new GLTFLoader();
-  loader.load(
-    '/hardbakeglb.glb',
-    (gltf: any) => {
-      const root = gltf.scene as THREE.Group;
-
-      const tempBox = new THREE.Box3().setFromObject(root);
-      const size = new THREE.Vector3();
-      tempBox.getSize(size);
-
-      const targetW = 3.5;
-      const currentMax = Math.max(size.x, size.z);
-      const scale = targetW / currentMax;
-      root.scale.setScalar(scale);
-
-      const box = new THREE.Box3().setFromObject(root);
-      // Seat flush on plinth top
-      root.position.y = PLINTH_TOP_Y - box.min.y;
-
-      // Center X only — no Z offset
-      const afterBox = new THREE.Box3().setFromObject(root);
-      const afterCenter = new THREE.Vector3();
-      afterBox.getCenter(afterCenter);
-      root.position.x -= afterCenter.x;
-      // Z intentionally NOT adjusted
-
-      const namedParts: Record<string, THREE.Object3D> = {};
-      root.traverse((obj) => {
-        namedParts[obj.name] = obj;
-        if ((obj as THREE.Mesh).isMesh) {
-          obj.castShadow = true;
-          obj.receiveShadow = true;
-        }
-      });
-
-      const hotPlate =
-        namedParts['HotPlate'] || namedParts['Hot_Plate'] ||
-        namedParts['Plate'] || namedParts['Heater'] || namedParts['Top'];
-
-      const lightGreen =
-        namedParts['LightGreen'] || namedParts['Light_Green'] || namedParts['LED_Green'];
-      const lightRed =
-        namedParts['LightRed'] || namedParts['Light_Red'] || namedParts['LED_Red'];
-
-      const scheme = { base: 0x200505, emissive: 0xff2200, light: 0xff3300, pl: 0xff2200 };
-
-      if (hotPlate && (hotPlate as THREE.Mesh).isMesh) {
-        const heatMat = new THREE.MeshStandardMaterial({
-          color: scheme.base,
-          emissive: scheme.emissive,
-          emissiveIntensity: 1.0,
-          roughness: 0.55,
-          metalness: 0.3,
-        });
-        (hotPlate as THREE.Mesh).material = heatMat;
-        placeholder.userData.heatMaterial = heatMat;
-        placeholder.userData.colorScheme = scheme;
-      }
-
-      if (lightGreen && (lightGreen as THREE.Mesh).isMesh) {
-        const greenMat = new THREE.MeshStandardMaterial({
-          color: 0x002200, emissive: 0x00ff44, emissiveIntensity: 4.0, roughness: 0.4,
-        });
-        (lightGreen as THREE.Mesh).material = greenMat;
-        placeholder.userData.greenLight = greenMat;
-      }
-
-      if (lightRed && (lightRed as THREE.Mesh).isMesh) {
-        const redMat = new THREE.MeshStandardMaterial({
-          color: 0x220000, emissive: 0xff0033, emissiveIntensity: 1.0, roughness: 0.4,
-        });
-        (lightRed as THREE.Mesh).material = redMat;
-        placeholder.userData.redLight = redMat;
-      }
-
-      const pl = new THREE.PointLight(scheme.pl, 0, 7);
-      pl.position.set(0, 1.2, 0);
-      root.add(pl);
-      placeholder.userData.processLight = pl;
-
-      placeholder.add(root);
-      placeholder.userData.glbRoot = root;
-      placeholder.userData.loaded = true;
-
-      addModuleLabel(placeholder, mod);
-      // ── ADD VISIBLE HOT PLATE CHUCK (PEB — post exposure bake) ──
-      addWaferChuck(placeholder, 'hotplate');
-      positionWaferAnchorAboveChuck(placeholder, root);
-
-      if (onReady) onReady(placeholder);
-    },
-    undefined,
-    (err: any) => console.error('PostBake GLB failed:', err)
-  );})();
-
-  return placeholder;
-}
+// ===== GLB-REMOVED (buildPostBakeGLB - /hardbakeglb.glb (dead)) - re-wire the new module here. See GLB_WIRING_CONTRACT.md =====
+// function buildPostBakeGLB(
+//   scene: THREE.Scene,
+//   mod: ProcessStep,
+//   onReady?: (group: THREE.Group) => void
+// ): THREE.Group {
+//   const placeholder = new THREE.Group();
+//   placeholder.position.set(mod.x, 0, mod.z);
+//   placeholder.userData.id = mod.id;
+//   scene.add(placeholder);
+// 
+// (async () => { const { GLTFLoader } = await import('three/examples/jsm/loaders/GLTFLoader.js'); const loader = new GLTFLoader();
+//   loader.load(
+//     '/hardbakeglb.glb',
+//     (gltf: any) => {
+//       const root = gltf.scene as THREE.Group;
+// 
+//       const tempBox = new THREE.Box3().setFromObject(root);
+//       const size = new THREE.Vector3();
+//       tempBox.getSize(size);
+// 
+//       const targetW = 3.5;
+//       const currentMax = Math.max(size.x, size.z);
+//       const scale = targetW / currentMax;
+//       root.scale.setScalar(scale);
+// 
+//       const box = new THREE.Box3().setFromObject(root);
+//       // Seat flush on plinth top
+//       root.position.y = PLINTH_TOP_Y - box.min.y;
+// 
+//       // Center X only — no Z offset
+//       const afterBox = new THREE.Box3().setFromObject(root);
+//       const afterCenter = new THREE.Vector3();
+//       afterBox.getCenter(afterCenter);
+//       root.position.x -= afterCenter.x;
+//       // Z intentionally NOT adjusted
+// 
+//       const namedParts: Record<string, THREE.Object3D> = {};
+//       root.traverse((obj) => {
+//         namedParts[obj.name] = obj;
+//         if ((obj as THREE.Mesh).isMesh) {
+//           obj.castShadow = true;
+//           obj.receiveShadow = true;
+//         }
+//       });
+// 
+//       const hotPlate =
+//         namedParts['HotPlate'] || namedParts['Hot_Plate'] ||
+//         namedParts['Plate'] || namedParts['Heater'] || namedParts['Top'];
+// 
+//       const lightGreen =
+//         namedParts['LightGreen'] || namedParts['Light_Green'] || namedParts['LED_Green'];
+//       const lightRed =
+//         namedParts['LightRed'] || namedParts['Light_Red'] || namedParts['LED_Red'];
+// 
+//       const scheme = { base: 0x200505, emissive: 0xff2200, light: 0xff3300, pl: 0xff2200 };
+// 
+//       if (hotPlate && (hotPlate as THREE.Mesh).isMesh) {
+//         const heatMat = new THREE.MeshStandardMaterial({
+//           color: scheme.base,
+//           emissive: scheme.emissive,
+//           emissiveIntensity: 1.0,
+//           roughness: 0.55,
+//           metalness: 0.3,
+//         });
+//         (hotPlate as THREE.Mesh).material = heatMat;
+//         placeholder.userData.heatMaterial = heatMat;
+//         placeholder.userData.colorScheme = scheme;
+//       }
+// 
+//       if (lightGreen && (lightGreen as THREE.Mesh).isMesh) {
+//         const greenMat = new THREE.MeshStandardMaterial({
+//           color: 0x002200, emissive: 0x00ff44, emissiveIntensity: 4.0, roughness: 0.4,
+//         });
+//         (lightGreen as THREE.Mesh).material = greenMat;
+//         placeholder.userData.greenLight = greenMat;
+//       }
+// 
+//       if (lightRed && (lightRed as THREE.Mesh).isMesh) {
+//         const redMat = new THREE.MeshStandardMaterial({
+//           color: 0x220000, emissive: 0xff0033, emissiveIntensity: 1.0, roughness: 0.4,
+//         });
+//         (lightRed as THREE.Mesh).material = redMat;
+//         placeholder.userData.redLight = redMat;
+//       }
+// 
+//       const pl = new THREE.PointLight(scheme.pl, 0, 7);
+//       pl.position.set(0, 1.2, 0);
+//       root.add(pl);
+//       placeholder.userData.processLight = pl;
+// 
+//       placeholder.add(root);
+//       placeholder.userData.glbRoot = root;
+//       placeholder.userData.loaded = true;
+// 
+//       addModuleLabel(placeholder, mod);
+//       // ── ADD VISIBLE HOT PLATE CHUCK (PEB — post exposure bake) ──
+//       addWaferChuck(placeholder, 'hotplate');
+//       positionWaferAnchorAboveChuck(placeholder, root);
+// 
+//       if (onReady) onReady(placeholder);
+//     },
+//     undefined,
+//     (err: any) => console.error('PostBake GLB failed:', err)
+//   );})();
+// 
+//   return placeholder;
+// }
 
 // function positionInterfaceWaferAnchor(
 //   placeholder: THREE.Group,
@@ -6609,417 +6746,420 @@ function positionInterfaceWaferAnchor(
 }
 
 
-function buildInterfaceGLB(
-  scene: THREE.Scene,
-  mod: ProcessStep,
-  onReady?: (group: THREE.Group) => void
-): THREE.Group {
-  const placeholder = new THREE.Group();
-
-  // ── Match the plinth nudge so the GLB sits ON its plinth, not in front of it ──
-  const nudgeZ = IFACE_LOCAL_Z[mod.id] ?? 0;
-  placeholder.position.set(mod.x, 0, mod.z + nudgeZ);
-  placeholder.userData.id = mod.id;
-  scene.add(placeholder);
-
-  const loader = new GLTFLoader();
-  loader.load(
-    '/hardbakeglb.glb',
-    (gltf: any) => {
-      const root = gltf.scene as THREE.Group;
-
-      // ── Scale to module footprint ──
-      const tempBox = new THREE.Box3().setFromObject(root);
-      const size = new THREE.Vector3();
-      tempBox.getSize(size);
-      const targetW = 3.0;
-      const currentMax = Math.max(size.x, size.z);
-      const scale = targetW / currentMax;
-      root.scale.setScalar(scale);
-
-      // ── Snap base to module floor ──
-      const box = new THREE.Box3().setFromObject(root);
-      root.position.y = MODULE_FLOOR_Y - box.min.y;
-
-      // ── Recenter X and Z on the model's true center, THEN apply manual tune ──
-      const afterBox = new THREE.Box3().setFromObject(root);
-      const afterCenter = new THREE.Vector3();
-      afterBox.getCenter(afterCenter);
-      root.position.x -= afterCenter.x;
-      root.position.z -= afterCenter.z;
-      // Manual nudge to seat the body inside its plinth (fixes "came forward").
-      root.position.z += IFACE_GLB_Z_OFFSET[mod.id] ?? 0;
-
-      // ── Index named nodes ──
-      const namedParts: Record<string, THREE.Object3D> = {};
-      root.traverse((obj) => {
-        namedParts[obj.name] = obj;
-        if ((obj as THREE.Mesh).isMesh) {
-          obj.castShadow = true;
-          obj.receiveShadow = true;
-          // ── Force all faces visible from every angle ──
-          const mesh = obj as THREE.Mesh;
-          const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-          mats.forEach((mat, i) => {
-            if (mat && mat.side !== THREE.DoubleSide) {
-              const clone = (mat as THREE.Material).clone() as THREE.MeshStandardMaterial;
-              clone.side = THREE.DoubleSide;
-              clone.needsUpdate = true;
-              if (Array.isArray(mesh.material)) {
-                (mesh.material as THREE.Material[])[i] = clone;
-              } else {
-                mesh.material = clone;
-              }
-            }
-          });
-        }
-      });
-
-      // ── Resolve IF_in / IF_out handoff nodes from the GLB (if present) ──
-      const ifIn = namedParts['IF_in'] || namedParts['IFin'] || namedParts['if_in'] || null;
-      const ifOut = namedParts['IF_out'] || namedParts['IFout'] || namedParts['if_out'] || null;
-
-      const lightGreen =
-        namedParts['LightGreen'] || namedParts['Light_Green'] || namedParts['LED_Green'];
-      const lightRed =
-        namedParts['LightRed'] || namedParts['Light_Red'] || namedParts['LED_Red'];
-
-      const scheme = { base: 0x2a2310, emissive: 0xffdd00, light: 0xffee33, pl: 0xffcc00 };
-
-      if (lightGreen && (lightGreen as THREE.Mesh).isMesh) {
-        const greenMat = new THREE.MeshStandardMaterial({
-          color: 0x002200, emissive: 0x00ff44, emissiveIntensity: 4.0, roughness: 0.4,
-        });
-        (lightGreen as THREE.Mesh).material = greenMat;
-        placeholder.userData.greenLight = greenMat;
-      }
-
-      if (lightRed && (lightRed as THREE.Mesh).isMesh) {
-        const redMat = new THREE.MeshStandardMaterial({
-          color: 0x220000, emissive: 0xff0033, emissiveIntensity: 1.0, roughness: 0.4,
-        });
-        (lightRed as THREE.Mesh).material = redMat;
-        placeholder.userData.redLight = redMat;
-      }
-
-      if (ifIn) placeholder.userData.ifIn = ifIn;
-      if (ifOut) placeholder.userData.ifOut = ifOut;
-
-      const pl = new THREE.PointLight(scheme.pl, 0, 6);
-      pl.position.set(0, 1.2, 0);
-      root.add(pl);
-      placeholder.userData.processLight = pl;
-
-      placeholder.add(root);
-      placeholder.userData.glbRoot = root;
-      placeholder.userData.loaded = true;
-
-      positionInterfaceWaferAnchor(placeholder, root, mod.id);
-
-      if (onReady) onReady(placeholder);
-    },
-    undefined,
-    (err: any) => console.error('Interface GLB failed to load:', err)
-  );
-
-  return placeholder;
-}
-
-
-function buildDIWaterRinseGLB(
-  scene: THREE.Scene,
-  mod: ProcessStep,
-  onReady?: (group: THREE.Group) => void
-): THREE.Group {
-  const placeholder = new THREE.Group();
-  placeholder.position.set(mod.x, 0, mod.z);
-  placeholder.userData.id = mod.id;
-  scene.add(placeholder);
-
-  const loader = new GLTFLoader();
-  loader.load(
-    '/Diwaterrinse.glb',
-    (gltf: any) => {
-      const root = gltf.scene as THREE.Group;
-
-      const tempBox = new THREE.Box3().setFromObject(root);
-      const size = new THREE.Vector3();
-      tempBox.getSize(size);
-
-      const targetW = 2.9;
-      const currentMax = Math.max(size.x, size.z);
-      const scale = targetW / currentMax;
-      root.scale.setScalar(scale);
-
-      const box = new THREE.Box3().setFromObject(root);
-      // Seat flush on plinth top
-      root.position.y = PLINTH_TOP_Y - box.min.y;
-
-      // Center X only — no Z offset
-      const afterBox = new THREE.Box3().setFromObject(root);
-      const afterCenter = new THREE.Vector3();
-      afterBox.getCenter(afterCenter);
-      root.position.x -= afterCenter.x;
-      // Z intentionally NOT adjusted
-
-      const namedParts: Record<string, THREE.Object3D> = {};
-      root.traverse((obj) => {
-        namedParts[obj.name] = obj;
-        if ((obj as THREE.Mesh).isMesh) {
-          obj.castShadow = true;
-          obj.receiveShadow = true;
-        }
-      });
-
-      const bowl =
-        namedParts['Bowl'] || namedParts['Basin'] ||
-        namedParts['Chuck'] || namedParts['Plate'] || namedParts['Top'];
-
-      const nozzle =
-        namedParts['Nozzle'] || namedParts['Arm'] ||
-        namedParts['Spray'] || namedParts['Head'];
-
-      const lightGreen =
-        namedParts['LightGreen'] || namedParts['Light_Green'] || namedParts['LED_Green'];
-      const lightRed =
-        namedParts['LightRed'] || namedParts['Light_Red'] || namedParts['LED_Red'];
-
-      // ── REPOSITION STAND TO CORNER WITH ZERO GAP AND 45° ROTATION ──
-      const stand =
-        namedParts['Stand'] || namedParts['Post'] || namedParts['Support'] ||
-        namedParts['Pedestal'] || namedParts['Base'] || namedParts['Column'];
-
-      if (stand) {
-        // Get base dimensions from the scaled GLB
-        const baseBox = new THREE.Box3().setFromObject(root);
-        const baseSize = new THREE.Vector3();
-        baseBox.getSize(baseSize);
-
-        // Get stand dimensions
-        const standBox = new THREE.Box3().setFromObject(stand);
-        const standSize = new THREE.Vector3();
-        standBox.getSize(standSize);
-
-        // Position stand at corner (back-right: +X, -Z) FLUSH with base edges (zero gap)
-        const cornerX = (baseSize.x / 2) - (standSize.x / 2);
-        const cornerZ = -(baseSize.z / 2) + (standSize.z / 2);
-
-        stand.position.set(cornerX, stand.position.y, cornerZ);
-        
-        // Add 45-degree rotation for proper orientation
-        stand.rotation.y = Math.PI / 4;  // 45 degrees
-        
-        console.log(`[RINSE] Stand repositioned to corner: X=${cornerX.toFixed(2)}, Z=${cornerZ.toFixed(2)}, Rotation=45°`);
-      }
-
-      const scheme = { base: 0x001428, emissive: 0x0088ff, light: 0x00aaff, pl: 0x0077ff };
-
-      if (bowl && (bowl as THREE.Mesh).isMesh) {
-        const bowlMat = new THREE.MeshStandardMaterial({
-          color: scheme.base,
-          emissive: scheme.emissive,
-          emissiveIntensity: 0.5,
-          roughness: 0.18,
-          metalness: 0.85,
-        });
-        (bowl as THREE.Mesh).material = bowlMat;
-        placeholder.userData.bowlMaterial = bowlMat;
-        placeholder.userData.colorScheme = scheme;
-      }
-
-      if (nozzle && (nozzle as THREE.Mesh).isMesh) {
-        const nozzleMat = new THREE.MeshStandardMaterial({
-          color: 0x223344,
-          emissive: 0x0055aa,
-          emissiveIntensity: 0.4,
-          roughness: 0.15,
-          metalness: 0.95,
-        });
-        (nozzle as THREE.Mesh).material = nozzleMat;
-        placeholder.userData.nozzleMaterial = nozzleMat;
-      }
-
-      if (lightGreen && (lightGreen as THREE.Mesh).isMesh) {
-        const greenMat = new THREE.MeshStandardMaterial({
-          color: 0x002200, emissive: 0x00ff44, emissiveIntensity: 4.0, roughness: 0.4,
-        });
-        (lightGreen as THREE.Mesh).material = greenMat;
-        placeholder.userData.greenLight = greenMat;
-      }
-
-      if (lightRed && (lightRed as THREE.Mesh).isMesh) {
-        const redMat = new THREE.MeshStandardMaterial({
-          color: 0x220000, emissive: 0xff0033, emissiveIntensity: 1.0, roughness: 0.4,
-        });
-        (lightRed as THREE.Mesh).material = redMat;
-        placeholder.userData.redLight = redMat;
-      }
-
-      const pl = new THREE.PointLight(scheme.pl, 0, 7);
-      pl.position.set(0, 1.2, 0);
-      root.add(pl);
-      placeholder.userData.processLight = pl;
-
-      placeholder.add(root);
-      placeholder.userData.glbRoot = root;
-      placeholder.userData.loaded = true;
-
-      addModuleLabel(placeholder, mod);
-      // ── ADD VISIBLE SPIN CHUCK (rinse) ──
-      addWaferChuck(placeholder, 'spin');
-      positionWaferAnchorAboveChuck(placeholder, root);
-
-      if (onReady) onReady(placeholder);
-    },
-    undefined,
-    (err: any) => console.error('DIWaterRinse GLB failed:', err)
-  );
-
-  return placeholder;
-}
-
-function buildDeveloperModuleGLB(
-  scene: THREE.Scene,
-  mod: ProcessStep,
-  onReady?: (group: THREE.Group) => void
-): THREE.Group {
-  const placeholder = new THREE.Group();
-  placeholder.position.set(mod.x, 0, mod.z);
-  placeholder.userData.id = mod.id;
-  scene.add(placeholder);
-
-  const loader = new GLTFLoader();
-  loader.load(
-    '/Developermodule.glb',
-    (gltf: any) => {
-      const root = gltf.scene as THREE.Group;
-
-      const tempBox = new THREE.Box3().setFromObject(root);
-      const size = new THREE.Vector3();
-      tempBox.getSize(size);
-
-      const targetW = 3;
-      const currentMax = Math.max(size.x, size.z);
-      const scale = targetW / currentMax;
-      root.scale.setScalar(scale);
-
-      const box = new THREE.Box3().setFromObject(root);
-      // Seat flush on plinth top
-      root.position.y = PLINTH_TOP_Y - box.min.y;
-
-      // Center X only — no Z offset
-      const afterBox = new THREE.Box3().setFromObject(root);
-      const afterCenter = new THREE.Vector3();
-      afterBox.getCenter(afterCenter);
-      root.position.x -= afterCenter.x;
-      // Z intentionally NOT adjusted
-
-      const namedParts: Record<string, THREE.Object3D> = {};
-      root.traverse((obj) => {
-        namedParts[obj.name] = obj;
-        if ((obj as THREE.Mesh).isMesh) {
-          obj.castShadow = true;
-          obj.receiveShadow = true;
-        }
-      });
-
-      const chuck =
-        namedParts['Chuck'] || namedParts['SpinChuck'] ||
-        namedParts['Plate'] || namedParts['Bowl'] || namedParts['Top'];
-
-      const arm =
-        namedParts['Arm'] || namedParts['NozzleArm'] ||
-        namedParts['Nozzle'] || namedParts['Dispense'];
-
-      const lightGreen =
-        namedParts['LightGreen'] || namedParts['Light_Green'] || namedParts['LED_Green'];
-      const lightRed =
-        namedParts['LightRed'] || namedParts['Light_Red'] || namedParts['LED_Red'];
-
-      // ── REPOSITION STAND TO CORNER ──
-      const stand =
-        namedParts['Stand'] || namedParts['Post'] || namedParts['Support'] ||
-        namedParts['Pedestal'] || namedParts['Base'] || namedParts['Column'];
-
-      if (stand) {
-        // Get base dimensions from the scaled GLB
-        const baseBox = new THREE.Box3().setFromObject(root);
-        const baseSize = new THREE.Vector3();
-        baseBox.getSize(baseSize);
-
-        // Get stand dimensions
-        const standBox = new THREE.Box3().setFromObject(stand);
-        const standSize = new THREE.Vector3();
-        standBox.getSize(standSize);
-
-        // Position stand at corner (back-right: +X, -Z) flush with base edges
-        // Using half dimensions to position from center
-        const cornerX = (baseSize.x / 2) - (standSize.x / 2);
-        const cornerZ = -(baseSize.z / 2) + (standSize.z / 2);
-
-        stand.position.set(cornerX, stand.position.y, cornerZ);
-        console.log(`[DEVELOPER] Stand repositioned to corner: X=${cornerX.toFixed(2)}, Z=${cornerZ.toFixed(2)}`);
-      }
-
-      const scheme = { base: 0x001a0a, emissive: 0x00ff88, light: 0x00dd66, pl: 0x00cc77 };
-
-      if (chuck && (chuck as THREE.Mesh).isMesh) {
-        const chuckMat = new THREE.MeshStandardMaterial({
-          color: 0x112233,
-          emissive: scheme.emissive,
-          emissiveIntensity: 0.4,
-          roughness: 0.15,
-          metalness: 0.92,
-        });
-        (chuck as THREE.Mesh).material = chuckMat;
-        placeholder.userData.chuckMaterial = chuckMat;
-        placeholder.userData.spinChuck = chuck;
-        placeholder.userData.colorScheme = scheme;
-      }
-
-      if (arm) {
-        placeholder.userData.dispenseArm = arm;
-        placeholder.userData.armRestY = (arm as THREE.Object3D).rotation.y;
-      }
-
-      if (lightGreen && (lightGreen as THREE.Mesh).isMesh) {
-        const greenMat = new THREE.MeshStandardMaterial({
-          color: 0x002200, emissive: 0x00ff44, emissiveIntensity: 4.0, roughness: 0.4,
-        });
-        (lightGreen as THREE.Mesh).material = greenMat;
-        placeholder.userData.greenLight = greenMat;
-      }
-
-      if (lightRed && (lightRed as THREE.Mesh).isMesh) {
-        const redMat = new THREE.MeshStandardMaterial({
-          color: 0x220000, emissive: 0xff0033, emissiveIntensity: 1.0, roughness: 0.4,
-        });
-        (lightRed as THREE.Mesh).material = redMat;
-        placeholder.userData.redLight = redMat;
-      }
-
-      const pl = new THREE.PointLight(scheme.pl, 0, 7);
-      pl.position.set(0, 1.2, 0);
-      root.add(pl);
-      placeholder.userData.processLight = pl;
-
-      placeholder.add(root);
-      placeholder.userData.glbRoot = root;
-      placeholder.userData.loaded = true;
-
-      addModuleLabel(placeholder, mod);
-      // ── ADD VISIBLE SPIN CHUCK (developer) ──
-      addWaferChuck(placeholder, 'spin');
-      positionWaferAnchorAboveChuck(placeholder, root);
-
-      if (onReady) onReady(placeholder);
-    },
-    undefined,
-    (err: any) => console.error('DeveloperModule GLB failed:', err)
-  );
-
-  return placeholder;
-}
+// ===== GLB-REMOVED (buildInterfaceGLB - /hardbakeglb.glb (dead)) - re-wire the new module here. See GLB_WIRING_CONTRACT.md =====
+// function buildInterfaceGLB(
+//   scene: THREE.Scene,
+//   mod: ProcessStep,
+//   onReady?: (group: THREE.Group) => void
+// ): THREE.Group {
+//   const placeholder = new THREE.Group();
+// 
+//   // ── Match the plinth nudge so the GLB sits ON its plinth, not in front of it ──
+//   const nudgeZ = IFACE_LOCAL_Z[mod.id] ?? 0;
+//   placeholder.position.set(mod.x, 0, mod.z + nudgeZ);
+//   placeholder.userData.id = mod.id;
+//   scene.add(placeholder);
+// 
+//   const loader = new GLTFLoader();
+//   loader.load(
+//     '/hardbakeglb.glb',
+//     (gltf: any) => {
+//       const root = gltf.scene as THREE.Group;
+// 
+//       // ── Scale to module footprint ──
+//       const tempBox = new THREE.Box3().setFromObject(root);
+//       const size = new THREE.Vector3();
+//       tempBox.getSize(size);
+//       const targetW = 3.0;
+//       const currentMax = Math.max(size.x, size.z);
+//       const scale = targetW / currentMax;
+//       root.scale.setScalar(scale);
+// 
+//       // ── Snap base to module floor ──
+//       const box = new THREE.Box3().setFromObject(root);
+//       root.position.y = MODULE_FLOOR_Y - box.min.y;
+// 
+//       // ── Recenter X and Z on the model's true center, THEN apply manual tune ──
+//       const afterBox = new THREE.Box3().setFromObject(root);
+//       const afterCenter = new THREE.Vector3();
+//       afterBox.getCenter(afterCenter);
+//       root.position.x -= afterCenter.x;
+//       root.position.z -= afterCenter.z;
+//       // Manual nudge to seat the body inside its plinth (fixes "came forward").
+//       root.position.z += IFACE_GLB_Z_OFFSET[mod.id] ?? 0;
+// 
+//       // ── Index named nodes ──
+//       const namedParts: Record<string, THREE.Object3D> = {};
+//       root.traverse((obj) => {
+//         namedParts[obj.name] = obj;
+//         if ((obj as THREE.Mesh).isMesh) {
+//           obj.castShadow = true;
+//           obj.receiveShadow = true;
+//           // ── Force all faces visible from every angle ──
+//           const mesh = obj as THREE.Mesh;
+//           const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+//           mats.forEach((mat, i) => {
+//             if (mat && mat.side !== THREE.DoubleSide) {
+//               const clone = (mat as THREE.Material).clone() as THREE.MeshStandardMaterial;
+//               clone.side = THREE.DoubleSide;
+//               clone.needsUpdate = true;
+//               if (Array.isArray(mesh.material)) {
+//                 (mesh.material as THREE.Material[])[i] = clone;
+//               } else {
+//                 mesh.material = clone;
+//               }
+//             }
+//           });
+//         }
+//       });
+// 
+//       // ── Resolve IF_in / IF_out handoff nodes from the GLB (if present) ──
+//       const ifIn = namedParts['IF_in'] || namedParts['IFin'] || namedParts['if_in'] || null;
+//       const ifOut = namedParts['IF_out'] || namedParts['IFout'] || namedParts['if_out'] || null;
+// 
+//       const lightGreen =
+//         namedParts['LightGreen'] || namedParts['Light_Green'] || namedParts['LED_Green'];
+//       const lightRed =
+//         namedParts['LightRed'] || namedParts['Light_Red'] || namedParts['LED_Red'];
+// 
+//       const scheme = { base: 0x2a2310, emissive: 0xffdd00, light: 0xffee33, pl: 0xffcc00 };
+// 
+//       if (lightGreen && (lightGreen as THREE.Mesh).isMesh) {
+//         const greenMat = new THREE.MeshStandardMaterial({
+//           color: 0x002200, emissive: 0x00ff44, emissiveIntensity: 4.0, roughness: 0.4,
+//         });
+//         (lightGreen as THREE.Mesh).material = greenMat;
+//         placeholder.userData.greenLight = greenMat;
+//       }
+// 
+//       if (lightRed && (lightRed as THREE.Mesh).isMesh) {
+//         const redMat = new THREE.MeshStandardMaterial({
+//           color: 0x220000, emissive: 0xff0033, emissiveIntensity: 1.0, roughness: 0.4,
+//         });
+//         (lightRed as THREE.Mesh).material = redMat;
+//         placeholder.userData.redLight = redMat;
+//       }
+// 
+//       if (ifIn) placeholder.userData.ifIn = ifIn;
+//       if (ifOut) placeholder.userData.ifOut = ifOut;
+// 
+//       const pl = new THREE.PointLight(scheme.pl, 0, 6);
+//       pl.position.set(0, 1.2, 0);
+//       root.add(pl);
+//       placeholder.userData.processLight = pl;
+// 
+//       placeholder.add(root);
+//       placeholder.userData.glbRoot = root;
+//       placeholder.userData.loaded = true;
+// 
+//       positionInterfaceWaferAnchor(placeholder, root, mod.id);
+// 
+//       if (onReady) onReady(placeholder);
+//     },
+//     undefined,
+//     (err: any) => console.error('Interface GLB failed to load:', err)
+//   );
+// 
+//   return placeholder;
+// }
+
+
+// ===== GLB-REMOVED (buildDIWaterRinseGLB - /Diwaterrinse.glb (dead)) - re-wire the new module here. See GLB_WIRING_CONTRACT.md =====
+// function buildDIWaterRinseGLB(
+//   scene: THREE.Scene,
+//   mod: ProcessStep,
+//   onReady?: (group: THREE.Group) => void
+// ): THREE.Group {
+//   const placeholder = new THREE.Group();
+//   placeholder.position.set(mod.x, 0, mod.z);
+//   placeholder.userData.id = mod.id;
+//   scene.add(placeholder);
+// 
+//   const loader = new GLTFLoader();
+//   loader.load(
+//     '/Diwaterrinse.glb',
+//     (gltf: any) => {
+//       const root = gltf.scene as THREE.Group;
+// 
+//       const tempBox = new THREE.Box3().setFromObject(root);
+//       const size = new THREE.Vector3();
+//       tempBox.getSize(size);
+// 
+//       const targetW = 2.9;
+//       const currentMax = Math.max(size.x, size.z);
+//       const scale = targetW / currentMax;
+//       root.scale.setScalar(scale);
+// 
+//       const box = new THREE.Box3().setFromObject(root);
+//       // Seat flush on plinth top
+//       root.position.y = PLINTH_TOP_Y - box.min.y;
+// 
+//       // Center X only — no Z offset
+//       const afterBox = new THREE.Box3().setFromObject(root);
+//       const afterCenter = new THREE.Vector3();
+//       afterBox.getCenter(afterCenter);
+//       root.position.x -= afterCenter.x;
+//       // Z intentionally NOT adjusted
+// 
+//       const namedParts: Record<string, THREE.Object3D> = {};
+//       root.traverse((obj) => {
+//         namedParts[obj.name] = obj;
+//         if ((obj as THREE.Mesh).isMesh) {
+//           obj.castShadow = true;
+//           obj.receiveShadow = true;
+//         }
+//       });
+// 
+//       const bowl =
+//         namedParts['Bowl'] || namedParts['Basin'] ||
+//         namedParts['Chuck'] || namedParts['Plate'] || namedParts['Top'];
+// 
+//       const nozzle =
+//         namedParts['Nozzle'] || namedParts['Arm'] ||
+//         namedParts['Spray'] || namedParts['Head'];
+// 
+//       const lightGreen =
+//         namedParts['LightGreen'] || namedParts['Light_Green'] || namedParts['LED_Green'];
+//       const lightRed =
+//         namedParts['LightRed'] || namedParts['Light_Red'] || namedParts['LED_Red'];
+// 
+//       // ── REPOSITION STAND TO CORNER WITH ZERO GAP AND 45° ROTATION ──
+//       const stand =
+//         namedParts['Stand'] || namedParts['Post'] || namedParts['Support'] ||
+//         namedParts['Pedestal'] || namedParts['Base'] || namedParts['Column'];
+// 
+//       if (stand) {
+//         // Get base dimensions from the scaled GLB
+//         const baseBox = new THREE.Box3().setFromObject(root);
+//         const baseSize = new THREE.Vector3();
+//         baseBox.getSize(baseSize);
+// 
+//         // Get stand dimensions
+//         const standBox = new THREE.Box3().setFromObject(stand);
+//         const standSize = new THREE.Vector3();
+//         standBox.getSize(standSize);
+// 
+//         // Position stand at corner (back-right: +X, -Z) FLUSH with base edges (zero gap)
+//         const cornerX = (baseSize.x / 2) - (standSize.x / 2);
+//         const cornerZ = -(baseSize.z / 2) + (standSize.z / 2);
+// 
+//         stand.position.set(cornerX, stand.position.y, cornerZ);
+//         
+//         // Add 45-degree rotation for proper orientation
+//         stand.rotation.y = Math.PI / 4;  // 45 degrees
+//         
+//         console.log(`[RINSE] Stand repositioned to corner: X=${cornerX.toFixed(2)}, Z=${cornerZ.toFixed(2)}, Rotation=45°`);
+//       }
+// 
+//       const scheme = { base: 0x001428, emissive: 0x0088ff, light: 0x00aaff, pl: 0x0077ff };
+// 
+//       if (bowl && (bowl as THREE.Mesh).isMesh) {
+//         const bowlMat = new THREE.MeshStandardMaterial({
+//           color: scheme.base,
+//           emissive: scheme.emissive,
+//           emissiveIntensity: 0.5,
+//           roughness: 0.18,
+//           metalness: 0.85,
+//         });
+//         (bowl as THREE.Mesh).material = bowlMat;
+//         placeholder.userData.bowlMaterial = bowlMat;
+//         placeholder.userData.colorScheme = scheme;
+//       }
+// 
+//       if (nozzle && (nozzle as THREE.Mesh).isMesh) {
+//         const nozzleMat = new THREE.MeshStandardMaterial({
+//           color: 0x223344,
+//           emissive: 0x0055aa,
+//           emissiveIntensity: 0.4,
+//           roughness: 0.15,
+//           metalness: 0.95,
+//         });
+//         (nozzle as THREE.Mesh).material = nozzleMat;
+//         placeholder.userData.nozzleMaterial = nozzleMat;
+//       }
+// 
+//       if (lightGreen && (lightGreen as THREE.Mesh).isMesh) {
+//         const greenMat = new THREE.MeshStandardMaterial({
+//           color: 0x002200, emissive: 0x00ff44, emissiveIntensity: 4.0, roughness: 0.4,
+//         });
+//         (lightGreen as THREE.Mesh).material = greenMat;
+//         placeholder.userData.greenLight = greenMat;
+//       }
+// 
+//       if (lightRed && (lightRed as THREE.Mesh).isMesh) {
+//         const redMat = new THREE.MeshStandardMaterial({
+//           color: 0x220000, emissive: 0xff0033, emissiveIntensity: 1.0, roughness: 0.4,
+//         });
+//         (lightRed as THREE.Mesh).material = redMat;
+//         placeholder.userData.redLight = redMat;
+//       }
+// 
+//       const pl = new THREE.PointLight(scheme.pl, 0, 7);
+//       pl.position.set(0, 1.2, 0);
+//       root.add(pl);
+//       placeholder.userData.processLight = pl;
+// 
+//       placeholder.add(root);
+//       placeholder.userData.glbRoot = root;
+//       placeholder.userData.loaded = true;
+// 
+//       addModuleLabel(placeholder, mod);
+//       // ── ADD VISIBLE SPIN CHUCK (rinse) ──
+//       addWaferChuck(placeholder, 'spin');
+//       positionWaferAnchorAboveChuck(placeholder, root);
+// 
+//       if (onReady) onReady(placeholder);
+//     },
+//     undefined,
+//     (err: any) => console.error('DIWaterRinse GLB failed:', err)
+//   );
+// 
+//   return placeholder;
+// }
+
+// ===== GLB-REMOVED (buildDeveloperModuleGLB - /Developermodule.glb (dead)) - re-wire the new module here. See GLB_WIRING_CONTRACT.md =====
+// function buildDeveloperModuleGLB(
+//   scene: THREE.Scene,
+//   mod: ProcessStep,
+//   onReady?: (group: THREE.Group) => void
+// ): THREE.Group {
+//   const placeholder = new THREE.Group();
+//   placeholder.position.set(mod.x, 0, mod.z);
+//   placeholder.userData.id = mod.id;
+//   scene.add(placeholder);
+// 
+//   const loader = new GLTFLoader();
+//   loader.load(
+//     '/Developermodule.glb',
+//     (gltf: any) => {
+//       const root = gltf.scene as THREE.Group;
+// 
+//       const tempBox = new THREE.Box3().setFromObject(root);
+//       const size = new THREE.Vector3();
+//       tempBox.getSize(size);
+// 
+//       const targetW = 3;
+//       const currentMax = Math.max(size.x, size.z);
+//       const scale = targetW / currentMax;
+//       root.scale.setScalar(scale);
+// 
+//       const box = new THREE.Box3().setFromObject(root);
+//       // Seat flush on plinth top
+//       root.position.y = PLINTH_TOP_Y - box.min.y;
+// 
+//       // Center X only — no Z offset
+//       const afterBox = new THREE.Box3().setFromObject(root);
+//       const afterCenter = new THREE.Vector3();
+//       afterBox.getCenter(afterCenter);
+//       root.position.x -= afterCenter.x;
+//       // Z intentionally NOT adjusted
+// 
+//       const namedParts: Record<string, THREE.Object3D> = {};
+//       root.traverse((obj) => {
+//         namedParts[obj.name] = obj;
+//         if ((obj as THREE.Mesh).isMesh) {
+//           obj.castShadow = true;
+//           obj.receiveShadow = true;
+//         }
+//       });
+// 
+//       const chuck =
+//         namedParts['Chuck'] || namedParts['SpinChuck'] ||
+//         namedParts['Plate'] || namedParts['Bowl'] || namedParts['Top'];
+// 
+//       const arm =
+//         namedParts['Arm'] || namedParts['NozzleArm'] ||
+//         namedParts['Nozzle'] || namedParts['Dispense'];
+// 
+//       const lightGreen =
+//         namedParts['LightGreen'] || namedParts['Light_Green'] || namedParts['LED_Green'];
+//       const lightRed =
+//         namedParts['LightRed'] || namedParts['Light_Red'] || namedParts['LED_Red'];
+// 
+//       // ── REPOSITION STAND TO CORNER ──
+//       const stand =
+//         namedParts['Stand'] || namedParts['Post'] || namedParts['Support'] ||
+//         namedParts['Pedestal'] || namedParts['Base'] || namedParts['Column'];
+// 
+//       if (stand) {
+//         // Get base dimensions from the scaled GLB
+//         const baseBox = new THREE.Box3().setFromObject(root);
+//         const baseSize = new THREE.Vector3();
+//         baseBox.getSize(baseSize);
+// 
+//         // Get stand dimensions
+//         const standBox = new THREE.Box3().setFromObject(stand);
+//         const standSize = new THREE.Vector3();
+//         standBox.getSize(standSize);
+// 
+//         // Position stand at corner (back-right: +X, -Z) flush with base edges
+//         // Using half dimensions to position from center
+//         const cornerX = (baseSize.x / 2) - (standSize.x / 2);
+//         const cornerZ = -(baseSize.z / 2) + (standSize.z / 2);
+// 
+//         stand.position.set(cornerX, stand.position.y, cornerZ);
+//         console.log(`[DEVELOPER] Stand repositioned to corner: X=${cornerX.toFixed(2)}, Z=${cornerZ.toFixed(2)}`);
+//       }
+// 
+//       const scheme = { base: 0x001a0a, emissive: 0x00ff88, light: 0x00dd66, pl: 0x00cc77 };
+// 
+//       if (chuck && (chuck as THREE.Mesh).isMesh) {
+//         const chuckMat = new THREE.MeshStandardMaterial({
+//           color: 0x112233,
+//           emissive: scheme.emissive,
+//           emissiveIntensity: 0.4,
+//           roughness: 0.15,
+//           metalness: 0.92,
+//         });
+//         (chuck as THREE.Mesh).material = chuckMat;
+//         placeholder.userData.chuckMaterial = chuckMat;
+//         placeholder.userData.spinChuck = chuck;
+//         placeholder.userData.colorScheme = scheme;
+//       }
+// 
+//       if (arm) {
+//         placeholder.userData.dispenseArm = arm;
+//         placeholder.userData.armRestY = (arm as THREE.Object3D).rotation.y;
+//       }
+// 
+//       if (lightGreen && (lightGreen as THREE.Mesh).isMesh) {
+//         const greenMat = new THREE.MeshStandardMaterial({
+//           color: 0x002200, emissive: 0x00ff44, emissiveIntensity: 4.0, roughness: 0.4,
+//         });
+//         (lightGreen as THREE.Mesh).material = greenMat;
+//         placeholder.userData.greenLight = greenMat;
+//       }
+// 
+//       if (lightRed && (lightRed as THREE.Mesh).isMesh) {
+//         const redMat = new THREE.MeshStandardMaterial({
+//           color: 0x220000, emissive: 0xff0033, emissiveIntensity: 1.0, roughness: 0.4,
+//         });
+//         (lightRed as THREE.Mesh).material = redMat;
+//         placeholder.userData.redLight = redMat;
+//       }
+// 
+//       const pl = new THREE.PointLight(scheme.pl, 0, 7);
+//       pl.position.set(0, 1.2, 0);
+//       root.add(pl);
+//       placeholder.userData.processLight = pl;
+// 
+//       placeholder.add(root);
+//       placeholder.userData.glbRoot = root;
+//       placeholder.userData.loaded = true;
+// 
+//       addModuleLabel(placeholder, mod);
+//       // ── ADD VISIBLE SPIN CHUCK (developer) ──
+//       addWaferChuck(placeholder, 'spin');
+//       positionWaferAnchorAboveChuck(placeholder, root);
+// 
+//       if (onReady) onReady(placeholder);
+//     },
+//     undefined,
+//     (err: any) => console.error('DeveloperModule GLB failed:', err)
+//   );
+// 
+//   return placeholder;
+// }
 
 // Helper — extract label code from buildModule into reusable function
 
@@ -9225,6 +9365,8 @@ class Sim {
   // start() call. We keep the promise so start()/reset() can reliably announce
   // instead of silently dropping the message when narration is not ready yet.
   private _narrationInit: Promise<any> | null = null;
+  /** Flip-chip robot controller; assigned once its GLB finishes loading. */
+  flipChipRobot?: FlipChipRobot;
   private _narratedSteps = new Set<string>();
   bonderController: BonderController | null = null;
   bondTransfer: WaferBonderTransfer | null = null;
@@ -9241,16 +9383,35 @@ class Sim {
     // Machine boundary: X = 3.2 (Bonder center at 13.2, width 20)
     // FOUP must stay at X < 0 with safe clearance
     const foupForwardX = step.x + INPUT_STATION_CONFIG.foupForwardOffset;  // From -20 to -18
-    foup.position.set(foupForwardX, 0, step.z + FIRST_RACK_OFFSET_Z);
+    // ── RELOCATED: was BEHIND the wafer module, now BESIDE it ──
+    // Previously (foupForwardX, 0, step.z + FIRST_RACK_OFFSET_Z) = (-18, 0, 6.5),
+    // which put the rack directly behind the circular wafer and overlapped the
+    // working area. It now sits on the wafer's -X side, sharing the wafer's Z so
+    // the two line up as one station. Y stays 0: the model is raised
+    // FOUP_FLOOR_CLEARANCE inside the group, so its base already rests on the
+    // same work surface as the wafer. The whole group moves as one unit, so
+    // every anchor and the GLB child follow automatically.
+    // Uniform enlargement of the WHOLE group, so the GLB and every anchor
+    // (pickup, approach, the 6 slots) scale together and stay consistent.
+    foup.scale.setScalar(RACK_SCALE);
+    // Y compensates for that scale: the model is lifted FOUP_FLOOR_CLEARANCE
+    // inside the group, and scaling multiplies that lift by RACK_SCALE. Setting
+    // y = WORK_SURFACE_Y - FOUP_FLOOR_CLEARANCE * RACK_SCALE puts the rack's
+    // base back exactly on the work surface, level with the wafer module.
+    foup.position.set(
+      RACK_RELOCATED_X,
+      WORK_SURFACE_Y - FOUP_FLOOR_CLEARANCE * RACK_SCALE,
+      WAFER_MODULE_Z
+    );
     foup.userData.originalX = step.x;  // Store original position
     foup.userData.currentForwardOffset = INPUT_STATION_CONFIG.foupForwardOffset;
     foup.userData.pendingBoundingBox = true;  // Mark for collision check after GLB loads
-    // Single authoritative orientation for the complete live rack. The GLB's
-    // front opening is local +Z; +90 degrees maps it to world +X, toward the
-    // EFEM robot at the right side of the rack.
-    foup.rotation.y = WAFER_RACK_ROTATION_Y;
+    // Orientation: the rack's own base orientation PLUS a quarter turn about the
+    // vertical axis, applied relative to what it already had rather than reset.
+    // Y is world-up here, so the rack stays upright - no tilt, no flip.
+    foup.rotation.y = WAFER_RACK_ROTATION_Y + RACK_QUARTER_TURN;
     foup.userData.rackRoot = foup;
-    foup.userData.rackRotationY = WAFER_RACK_ROTATION_Y;
+    foup.userData.rackRotationY = foup.rotation.y;
 
     // ── PICKUP TARGET: Align with actual first wafer slot inside FOUP ──
     // First slot is at: Y=0.55, Z=0.35 (deep inside, not at front edge)
@@ -9269,8 +9430,16 @@ class Sim {
     foup.add(rackApproachTarget);
     foup.userData.rackApproachTarget = rackApproachTarget;
     foup.userData.rackPickTarget = pickupAnchor;
+    // WORLD-space front direction. It bakes in the group's actual rotation
+    // because the consumer at _startWaferTransfer() uses it directly, without
+    // applying the group quaternion:
+    //     source.addScaledVector(foupFrontDir, 0.15)
+    // Baking WAFER_RACK_ROTATION_Y alone was correct only while the group's
+    // rotation equalled it. Now that the rack carries an extra quarter turn,
+    // this must follow foup.rotation.y or the gripper offset points 90 degrees
+    // off the rack's opening.
     foup.userData.rackFrontDirection = new THREE.Vector3(0, 0, 1)
-      .applyAxisAngle(new THREE.Vector3(0, 1, 0), WAFER_RACK_ROTATION_Y);
+      .applyAxisAngle(new THREE.Vector3(0, 1, 0), foup.rotation.y);
 
     const slotAnchors: THREE.Object3D[] = [];
     for (let index = 0; index < 6; index += 1) {
@@ -9369,12 +9538,473 @@ class Sim {
 
     const bonderController = new BonderController(wrapper);
     this.bonderController = bonderController;
-    bonderController.load().then(({ clips }) => {
-        // Shadow setup is handled inside the orchestrator's _fitModel().
-        console.log("[FLIP-CHIP] Animation controller ready", clips);
-      }).catch((error: unknown) => console.error("[FLIP-CHIP] GLB load error:", error));
+    // ===== GLB-REMOVED (BonderController.load() - /flip_chip_bonder.glb) - re-wire the new module here. See GLB_WIRING_CONTRACT.md =====
+//     bonderController.load().then(({ clips }) => {
+//         // Shadow setup is handled inside the orchestrator's _fitModel().
+//         console.log("[FLIP-CHIP] Animation controller ready", clips);
+//       }).catch((error: unknown) => console.error("[FLIP-CHIP] GLB load error:", error));
 
     return wrapper;
+  }
+
+  /**
+   * Second wafer module (/waferrxk.glb), placed BESIDE the Input Wafer (FOUP).
+   *
+   * Owns nothing but this model: its own group, its own transform. The FOUP and
+   * the output rack are read but never modified. Everything is derived from the
+   * FOUP's live world bounds rather than hard-coded, so if the input station
+   * moves, this follows it and stays beside it.
+   */
+  private _buildSecondWaferModule(foup: THREE.Group): THREE.Group {
+    const group = new THREE.Group();
+    group.name = 'second_wafer_module';
+
+    // Match the Input Wafer's orientation exactly so they read as one station.
+    group.rotation.y = WAFER_RACK_ROTATION_Y;
+
+    // ── Where the FOUP is ──
+    // ── FIXED world position - this module does not move ──
+    // Pinned to explicit constants rather than derived from the FOUP. Two
+    // reasons:
+    //   1. The rack is relocated beside this wafer, so deriving the wafer from
+    //      the rack would drag the wafer along with it.
+    //   2. _buildFoup() loads its model asynchronously, so at this moment the
+    //      FOUP holds only empty anchor Object3Ds with no geometry, and
+    //      Box3().setFromObject(foup) returns an EMPTY box (min = +Infinity).
+    //      Deriving from that put this group at Infinity and it rendered
+    //      nowhere at all.
+    // The model is centred on X/Z inside the group below, so the group's
+    // position IS the wafer's centre.
+    group.position.set(WAFER_MODULE_X, WORK_SURFACE_Y, WAFER_MODULE_Z);
+
+    // Guard: never let a non-finite transform through again. If it ever does,
+    // say so loudly rather than letting the model vanish silently.
+    if (!Number.isFinite(group.position.x) || !Number.isFinite(group.position.z)) {
+      console.error(
+        '[WAFER-2] non-finite placement computed',
+        group.position.toArray(), '- falling back to the pinned position.'
+      );
+      group.position.set(-18, WORK_SURFACE_Y, 1.2165);
+    }
+
+    // NO placeholder geometry here, deliberately. This group renders ONLY
+    // /waferrxk.glb. Nothing else is ever added to it, so anything visible at
+    // this station is that file and nothing else - if the load fails the spot
+    // stays empty and the console says so, rather than showing a stand-in that
+    // could be mistaken for the model.
+
+    loadOptimizedGLB(SECOND_RACK_URL, {
+      label: 'second wafer module',
+      instanceThreshold: 8,
+    })
+      .then((result) => {
+        if (!result) {
+          console.error(
+            `[WAFER-2] FAILED to load ${SECOND_RACK_URL} - station left empty. ` +
+            `Check the Network tab for that URL.`
+          );
+          return;
+        }
+
+        const model = result.scene;
+
+        // ── Uniform scale: preserve aspect ratio, never stretch ──
+        // Natural size is ~0.1835 x 0.0160 x 0.1825, so drive the scale off the
+        // widest horizontal axis and let height follow.
+        model.updateMatrixWorld(true);
+        const raw = new THREE.Box3().setFromObject(model);
+        const rawSize = new THREE.Vector3();
+        raw.getSize(rawSize);
+        const widest = Math.max(rawSize.x, rawSize.z);
+        if (widest > 0 && Number.isFinite(widest)) {
+          model.scale.setScalar(SECOND_MODULE_TARGET_WIDTH / widest);
+        }
+
+        // ── Re-measure AFTER scaling, then seat it ──
+        // Centre on X/Z and drop min.y to 0 (the group already sits at the work
+        // surface), so the base touches the plane exactly: no sink, no float.
+        model.position.set(0, 0, 0);
+        model.updateMatrixWorld(true);
+        const fitted = new THREE.Box3().setFromObject(model);
+        const fittedCentre = new THREE.Vector3();
+        const fittedSize = new THREE.Vector3();
+        fitted.getCenter(fittedCentre);
+        fitted.getSize(fittedSize);
+        model.position.x -= fittedCentre.x;
+        model.position.z -= fittedCentre.z;
+        model.position.y -= fitted.min.y;
+
+        model.name = 'second_wafer_model';
+        model.traverse((child: THREE.Object3D) => {
+          if ((child as THREE.Mesh).isMesh || (child as any).isInstancedMesh) {
+            child.castShadow = true;
+            child.receiveShadow = true;
+          }
+        });
+
+        group.add(model);
+
+        // Position stays pinned - the model is centred inside the group, so no
+        // post-load correction is needed and the wafer never shifts.
+
+        group.updateMatrixWorld(true);
+        group.userData.glbRoot = model;
+        group.userData.boundingBox = new THREE.Box3().setFromObject(group);
+
+        if (result.animations.length > 0) {
+          const mixer = new THREE.AnimationMixer(model);
+          result.animations.forEach((clip) => mixer.clipAction(clip).play());
+          group.userData.mixer = mixer;
+        }
+
+        const finalBox = group.userData.boundingBox as THREE.Box3;
+        console.log(
+          `[WAFER-2] rendering ${SECOND_RACK_URL} (and nothing else): ` +
+          `${result.stats.meshesAfter} meshes, ${result.stats.instancedGroups} instanced groups, ` +
+          `nodes ${result.stats.nodesBefore} -> ${result.stats.nodesAfter}`
+        );
+        console.log(
+          `[WAFER-2] seated beside FOUP: size ${fittedSize.x.toFixed(2)} x ` +
+          `${fittedSize.y.toFixed(2)} x ${fittedSize.z.toFixed(2)}, ` +
+          `base Y=${finalBox.min.y.toFixed(3)} (surface ${WORK_SURFACE_Y}), ` +
+          `gap to rack=${(finalBox.min.x - RACK_RELOCATED_MAX_X).toFixed(2)}, ` +
+          `centre=[${group.position.x.toFixed(2)}, ${group.position.y.toFixed(2)}, ${group.position.z.toFixed(2)}]`
+        );
+      })
+      .catch((error: unknown) => {
+        console.error(
+          `[WAFER-2] post-load setup failed for ${SECOND_RACK_URL} - station left empty.`,
+          error
+        );
+      });
+
+    return group;
+  }
+
+  /**
+   * Flux fixture station (/flux_fixture.glb).
+   *
+   * Sits on the production axis (X) one RACK_CLEARANCE beyond the wafer rack's
+   * +X edge, so the gap between them IS the robot working corridor. Reuses
+   * loadOptimizedGLB - no second loader, no second animation loop: its clip is
+   * driven by the shared render loop via userData.mixer.
+   */
+  /**
+   * Bounding-box validation of the station layout (spec section 12).
+   *
+   * Every model loads asynchronously, so this retries until each station has
+   * real geometry, then reports the MEASURED world-space clearance and any
+   * unintended intersection. Nothing here moves anything - it only reports.
+   */
+  private _validateLayout(attempt = 0): void {
+    const want = ['foup', 'second_wafer_module', 'flux_fixture', 'substage_align'];
+    const boxes: Record<string, THREE.Box3> = {};
+    for (const key of want) {
+      const obj = this.modObjs[key];
+      if (!obj) continue;
+      const box = new THREE.Box3().setFromObject(obj);
+      if (!box.isEmpty()) boxes[key] = box;
+    }
+
+    if (Object.keys(boxes).length < want.length) {
+      if (attempt < 40) {
+        setTimeout(() => this._validateLayout(attempt + 1), 250);
+      } else {
+        console.warn('[LAYOUT] validation gave up - stations still without geometry:',
+          want.filter((k) => !boxes[k]));
+      }
+      return;
+    }
+
+    const rack = boxes.foup;
+    const wafer = boxes.second_wafer_module;
+    const flux = boxes.flux_fixture;
+    const substage = boxes.substage_align;
+
+    // Straight-line check: every station must share one Z on the X flow axis.
+    const cz = (b: THREE.Box3) => (b.min.z + b.max.z) / 2;
+    const collinear = Object.values(boxes).every(
+      (b) => Math.abs(cz(b) - PRODUCTION_AXIS_Z) < 0.01
+    );
+
+    // The required clearance, measured from real geometry rather than assumed.
+    const clearance = flux.min.x - wafer.max.x;
+    const EPS = 1e-6;   // float tolerance; the constants give exactly 30.0
+
+    console.log(
+      `[LAYOUT] axis=X  rack X[${rack.min.x.toFixed(2)}, ${rack.max.x.toFixed(2)}]  ` +
+      `wafer X[${wafer.min.x.toFixed(2)}, ${wafer.max.x.toFixed(2)}]  ` +
+      `flux X[${flux.min.x.toFixed(2)}, ${flux.max.x.toFixed(2)}]  ` +
+      `substage X[${substage.min.x.toFixed(2)}, ${substage.max.x.toFixed(2)}]`
+    );
+    console.log(
+      `[LAYOUT] rack->flux clearance = ${clearance.toFixed(3)} ` +
+      `(required ${RACK_CLEARANCE}) ` +
+      (clearance + EPS >= RACK_CLEARANCE ? 'PASS' : 'FAIL')
+    );
+    console.log(`[LAYOUT] straight line (shared Z): ${collinear ? 'PASS' : 'FAIL'}`);
+    console.log(
+      `[LAYOUT] flux->substage gap = ${(substage.min.x - flux.max.x).toFixed(3)} ` +
+      `(required ${SUBSTAGE_GAP}) ` +
+      (substage.min.x - flux.max.x + EPS >= SUBSTAGE_GAP ? 'PASS' : 'FAIL')
+    );
+    console.log(
+      `[LAYOUT] station order on X: ` +
+      (rack.max.x <= wafer.min.x && wafer.max.x <= flux.min.x && flux.max.x <= substage.min.x
+        ? 'rack -> wafer -> flux -> substage  PASS'
+        : 'OUT OF ORDER  FAIL')
+    );
+
+    const surface = WORK_SURFACE_Y;
+    for (const [name, box] of Object.entries(boxes)) {
+      const seated = Math.abs(box.min.y - surface) < 1e-3;
+      if (!seated) {
+        console.warn(
+          `[LAYOUT] ${name} base Y=${box.min.y.toFixed(3)} is not on the work surface ${surface}`
+        );
+      }
+    }
+
+    const pairs: Array<[string, THREE.Box3, THREE.Box3]> = [
+      ['foup <-> wafer', rack, wafer],
+      ['foup <-> flux', rack, flux],
+      ['wafer <-> flux', wafer, flux],
+      ['flux <-> substage', flux, substage],
+      ['wafer <-> substage', wafer, substage],
+    ];
+    for (const [label, a, b] of pairs) {
+      if (a.intersectsBox(b)) console.error(`[LAYOUT] OVERLAP: ${label}`);
+    }
+    console.log('[LAYOUT] collision check complete');
+  }
+
+  /**
+   * Flip-chip robot station (/FlipChip_Robotfinal.glb), standing in the robot
+   * working corridor between the wafer rack and the flux fixture.
+   *
+   * Uses the asset author's FlipChipRobot controller rather than the generic
+   * loader: the rig is skinned, bone-driven, and its Rotary_Actuator rest
+   * quaternion is (0.5, 0.5, 0.5, 0.5), so node lookup and rest-pose capture
+   * have to happen before the mixer ever runs. It is ticked from the shared
+   * render loop - no second RAF, no second animation system.
+   */
+  private _buildFlipChipRobot(): THREE.Group {
+    const group = new THREE.Group();
+    group.name = 'flip_chip_robot';
+    group.position.set(
+      FLIP_ROBOT_POSITION.x,
+      FLIP_ROBOT_POSITION.y,
+      FLIP_ROBOT_POSITION.z
+    );
+
+    const robot = new FlipChipRobot();
+    robot
+      .load(FLIP_ROBOT_URL)
+      .then(() => {
+        // Normalise metres -> scene units, once, at load.
+        robot.root.scale.setScalar(FLIP_ROBOT_SCALE);
+        robot.root.updateMatrixWorld(true);
+
+        // Seat it: centre on X/Z and drop its feet to y = 0 in group space, so
+        // the base rests on the same work surface as the other stations.
+        const fitted = new THREE.Box3().setFromObject(robot.root);
+        const centre = new THREE.Vector3();
+        const size = new THREE.Vector3();
+        fitted.getCenter(centre);
+        fitted.getSize(size);
+        robot.root.position.x -= centre.x;
+        robot.root.position.z -= centre.z;
+        robot.root.position.y -= fitted.min.y;
+
+        group.add(robot.root);
+        group.updateMatrixWorld(true);
+
+        this.flipChipRobot = robot;
+        group.userData.robot = robot;
+        group.userData.boundingBox = new THREE.Box3().setFromObject(group);
+
+        // Run the 7.5 s cycle, looping, driven by the shared loop.
+        robot.play();
+        robot.onPhaseChange((phase) => {
+          this._addLog(`[FLIP ROBOT] ${phase}`, 'move');
+        });
+
+        const box = group.userData.boundingBox as THREE.Box3;
+        console.log(
+          `[FLIP-ROBOT] ${FLIP_ROBOT_URL} seated: size ` +
+          `${size.x.toFixed(2)} x ${size.y.toFixed(2)} x ${size.z.toFixed(2)}, ` +
+          `base Y=${box.min.y.toFixed(3)} (surface ${WORK_SURFACE_Y}), ` +
+          `centre=[${group.position.x.toFixed(2)}, ${group.position.y.toFixed(2)}, ${group.position.z.toFixed(2)}], ` +
+          `clips=${robot.actions.length}`
+        );
+      })
+      .catch((error: unknown) => {
+        console.error(`[FLIP-ROBOT] FAILED to load ${FLIP_ROBOT_URL}.`, error);
+      });
+
+    return group;
+  }
+
+  /**
+   * Substrate align stage (/SUBSTAGE_Align.glb) - the station AFTER the flux
+   * fixture on the production axis. Same loader, same seating rules, same
+   * shared render loop as every other station.
+   */
+  private _buildSubstageAlign(): THREE.Group {
+    const group = new THREE.Group();
+    group.name = 'substage_align';
+    group.position.set(SUBSTAGE_POSITION.x, SUBSTAGE_POSITION.y, SUBSTAGE_POSITION.z);
+
+    loadOptimizedGLB(SUBSTAGE_URL, { label: 'substrate align stage' })
+      .then((result) => {
+        if (!result) {
+          console.error(`[SUBSTAGE] FAILED to load ${SUBSTAGE_URL} - station left empty.`);
+          return;
+        }
+
+        const model = result.scene;
+        model.scale.setScalar(SUBSTAGE_SCALE);
+        model.updateMatrixWorld(true);
+
+        // Measure AFTER scaling, then seat: centre on X/Z, base to y = 0 in
+        // group space so it rests on the shared work surface.
+        const fitted = new THREE.Box3().setFromObject(model);
+        const centre = new THREE.Vector3();
+        const size = new THREE.Vector3();
+        fitted.getCenter(centre);
+        fitted.getSize(size);
+        model.position.x -= centre.x;
+        model.position.z -= centre.z;
+        model.position.y -= fitted.min.y;
+
+        model.name = 'substage_align_model';
+        model.traverse((child: THREE.Object3D) => {
+          if ((child as THREE.Mesh).isMesh || (child as any).isInstancedMesh) {
+            child.castShadow = true;
+            child.receiveShadow = true;
+          }
+        });
+
+        group.add(model);
+        group.updateMatrixWorld(true);
+
+        // Placement height, measured not guessed: the top of SUBSTAGE_ActiveSite
+        // is where the flipped chip is set down.
+        const activeSite = model.getObjectByName('SUBSTAGE_ActiveSite');
+        const siteBox = new THREE.Box3().setFromObject(activeSite ?? model);
+        group.userData.glbRoot = model;
+        group.userData.boundingBox = new THREE.Box3().setFromObject(group);
+        group.userData.placeSurfaceY = siteBox.max.y;
+        group.userData.activeSiteNode = activeSite ?? null;
+
+        const placeTarget = new THREE.Object3D();
+        placeTarget.name = 'SubstagePlaceTarget';
+        placeTarget.position.set(0, siteBox.max.y - group.position.y, 0);
+        group.add(placeTarget);
+        group.userData.placeTarget = placeTarget;
+
+        const box = group.userData.boundingBox as THREE.Box3;
+        console.log(
+          `[SUBSTAGE] ${SUBSTAGE_URL} seated: size ` +
+          `${size.x.toFixed(2)} x ${size.y.toFixed(2)} x ${size.z.toFixed(2)}, ` +
+          `base Y=${box.min.y.toFixed(3)} (surface ${WORK_SURFACE_Y}), ` +
+          `placeSurfaceY=${siteBox.max.y.toFixed(3)}, ` +
+          `centre=[${group.position.x.toFixed(2)}, ${group.position.y.toFixed(2)}, ${group.position.z.toFixed(2)}]`
+        );
+      })
+      .catch((error: unknown) => {
+        console.error(`[SUBSTAGE] post-load setup failed for ${SUBSTAGE_URL}.`, error);
+      });
+
+    return group;
+  }
+
+  private _buildFluxFixture(): THREE.Group {
+    const group = new THREE.Group();
+    group.name = 'flux_fixture';
+    group.position.set(
+      FLUX_FIXTURE_POSITION.x,
+      FLUX_FIXTURE_POSITION.y,
+      FLUX_FIXTURE_POSITION.z
+    );
+
+    loadOptimizedGLB(FLUX_FIXTURE_URL, { label: 'flux fixture' })
+      .then((result) => {
+        if (!result) {
+          console.error(
+            `[FLUX] FAILED to load ${FLUX_FIXTURE_URL} - station left empty.`
+          );
+          return;
+        }
+
+        const model = result.scene;
+
+        // Single normalisation factor, applied once at load.
+        model.scale.setScalar(FLUX_FIXTURE_SCALE);
+        model.updateMatrixWorld(true);
+
+        // Measure AFTER scaling, then seat: centre on X/Z and drop the base to
+        // y = 0 in group space (the group already sits at the work surface), so
+        // the fixture rests on the surface exactly - no sinking, no floating.
+        const fitted = new THREE.Box3().setFromObject(model);
+        const centre = new THREE.Vector3();
+        const size = new THREE.Vector3();
+        fitted.getCenter(centre);
+        fitted.getSize(size);
+        model.position.x -= centre.x;
+        model.position.z -= centre.z;
+        model.position.y -= fitted.min.y;
+
+        model.name = 'flux_fixture_model';
+        model.traverse((child: THREE.Object3D) => {
+          if ((child as THREE.Mesh).isMesh || (child as any).isInstancedMesh) {
+            child.castShadow = true;
+            child.receiveShadow = true;
+          }
+        });
+
+        group.add(model);
+        group.updateMatrixWorld(true);
+
+        // ── Contact height, measured not guessed ──
+        // The chip must touch the flux gel, not hover over it or sink through
+        // it. Take the world-space top of the FluxSurface node when the model
+        // provides one, else fall back to the whole fixture's top.
+        const fluxSurface = model.getObjectByName('FluxSurface');
+        const surfaceBox = new THREE.Box3().setFromObject(fluxSurface ?? model);
+        const fixtureBox = new THREE.Box3().setFromObject(group);
+        group.userData.glbRoot = model;
+        group.userData.boundingBox = fixtureBox;
+        group.userData.fluxSurfaceY = surfaceBox.max.y;
+        group.userData.fluxSurfaceNode = fluxSurface ?? null;
+
+        // Dip target: directly above the flux surface, on the production axis.
+        const dipTarget = new THREE.Object3D();
+        dipTarget.name = 'FluxDipTarget';
+        dipTarget.position.set(0, surfaceBox.max.y - group.position.y, 0);
+        group.add(dipTarget);
+        group.userData.dipTarget = dipTarget;
+
+        if (result.animations.length > 0) {
+          const mixer = new THREE.AnimationMixer(model);
+          result.animations.forEach((clip) => mixer.clipAction(clip).play());
+          group.userData.mixer = mixer;
+        }
+
+        console.log(
+          `[FLUX] ${FLUX_FIXTURE_URL} seated: size ` +
+          `${size.x.toFixed(2)} x ${size.y.toFixed(2)} x ${size.z.toFixed(2)}, ` +
+          `base Y=${fixtureBox.min.y.toFixed(3)} (surface ${WORK_SURFACE_Y}), ` +
+          `fluxSurfaceY=${surfaceBox.max.y.toFixed(3)}, ` +
+          `centre=[${group.position.x.toFixed(2)}, ${group.position.y.toFixed(2)}, ${group.position.z.toFixed(2)}], ` +
+          `clips=[${result.animations.map((a) => a.name).join(', ')}]`
+        );
+      })
+      .catch((error: unknown) => {
+        console.error(`[FLUX] post-load setup failed for ${FLUX_FIXTURE_URL}.`, error);
+      });
+
+    return group;
   }
 
   private _buildFinalWaferRack(): THREE.Group {
@@ -9415,78 +10045,80 @@ class Sim {
       foupStep.z + BONDER_WIDTH / 2 + RACK_DISTANCE + RACK_WIDTH / 2
     );
 
-    loader.load(
-      "/wafer_rack_module.glb",
-      (gltf: any) => {
-        const model = gltf.scene as THREE.Group;
-        const bounds = new THREE.Box3().setFromObject(model);
-        const size = new THREE.Vector3();
-        bounds.getSize(size);
-        if (size.x > 0 && size.y > 0 && size.z > 0) {
-          model.scale.set(
-            RACK_WIDTH / size.x,
-            RACK_HEIGHT / size.y,
-            RACK_LENGTH / size.z
-          );
-        }
 
-        model.updateMatrixWorld(true);
-        const scaledBounds = new THREE.Box3().setFromObject(model);
-        const center = new THREE.Vector3();
-        scaledBounds.getCenter(center);
-        model.position.x -= center.x;
-        model.position.z -= center.z;
-        model.position.y -= scaledBounds.min.y;
-        model.name = "final_wafer_rack_model";
-        model.traverse((child: THREE.Object3D) => {
-          if ((child as THREE.Mesh).isMesh) {
-            child.castShadow = true;
-            child.receiveShadow = true;
-          }
-        });
-
-        // ── Add solid back panel to close the rear side ──
-        // After 180° rotation, the back panel should be at local +Z (originally front)
-        // The front opening is now at local -Z after 180° rotation
-        const backPanelGeometry = new THREE.BoxGeometry(RACK_WIDTH, RACK_HEIGHT, 0.08);
-        const backPanelMaterial = new THREE.MeshStandardMaterial({
-          color: 0x4a5568,
-          metalness: 0.6,
-          roughness: 0.4,
-        });
-        const backPanel = new THREE.Mesh(backPanelGeometry, backPanelMaterial);
-        // Back panel at local +Z (the side opposite to front opening after 180° rotation)
-        backPanel.position.set(0, RACK_HEIGHT / 2, RACK_LENGTH / 2 + 0.04);
-        backPanel.castShadow = true;
-        backPanel.receiveShadow = true;
-        backPanel.name = "FinalRackBackPanel";
-        wrapper.add(backPanel);
-
-        // Add stiffening ribs to back panel for realism
-        const ribMaterial = new THREE.MeshStandardMaterial({
-          color: 0x3a4558,
-          metalness: 0.7,
-          roughness: 0.3,
-        });
-        for (let i = 0; i < 5; i++) {
-          const rib = new THREE.Mesh(
-            new THREE.BoxGeometry(RACK_WIDTH, 0.06, 0.06),
-            ribMaterial
-          );
-          rib.position.set(0, (i + 1) * (RACK_HEIGHT / 6), RACK_LENGTH / 2 + 0.08);
-          rib.castShadow = true;
-          rib.receiveShadow = true;
-          wrapper.add(rib);
-        }
-
-        wrapper.userData.glbRoot = model;
-        wrapper.userData.isFinalRack = true;
-        wrapper.userData.hasBackPanel = true;
-        wrapper.add(model);
-      },
-      undefined,
-      (error: unknown) => console.error("[FINAL-RACK] GLB load error:", error)
-    );
+    // ===== GLB-REMOVED (final OUTPUT wafer rack - /wafer_rack_module.glb) - re-wire the new module here. See GLB_WIRING_CONTRACT.md =====
+//     loader.load(
+//       "/wafer_rack_module.glb",
+//       (gltf: any) => {
+//         const model = gltf.scene as THREE.Group;
+//         const bounds = new THREE.Box3().setFromObject(model);
+//         const size = new THREE.Vector3();
+//         bounds.getSize(size);
+//         if (size.x > 0 && size.y > 0 && size.z > 0) {
+//           model.scale.set(
+//             RACK_WIDTH / size.x,
+//             RACK_HEIGHT / size.y,
+//             RACK_LENGTH / size.z
+//           );
+//         }
+// 
+//         model.updateMatrixWorld(true);
+//         const scaledBounds = new THREE.Box3().setFromObject(model);
+//         const center = new THREE.Vector3();
+//         scaledBounds.getCenter(center);
+//         model.position.x -= center.x;
+//         model.position.z -= center.z;
+//         model.position.y -= scaledBounds.min.y;
+//         model.name = "final_wafer_rack_model";
+//         model.traverse((child: THREE.Object3D) => {
+//           if ((child as THREE.Mesh).isMesh) {
+//             child.castShadow = true;
+//             child.receiveShadow = true;
+//           }
+//         });
+// 
+//         // ── Add solid back panel to close the rear side ──
+//         // After 180° rotation, the back panel should be at local +Z (originally front)
+//         // The front opening is now at local -Z after 180° rotation
+//         const backPanelGeometry = new THREE.BoxGeometry(RACK_WIDTH, RACK_HEIGHT, 0.08);
+//         const backPanelMaterial = new THREE.MeshStandardMaterial({
+//           color: 0x4a5568,
+//           metalness: 0.6,
+//           roughness: 0.4,
+//         });
+//         const backPanel = new THREE.Mesh(backPanelGeometry, backPanelMaterial);
+//         // Back panel at local +Z (the side opposite to front opening after 180° rotation)
+//         backPanel.position.set(0, RACK_HEIGHT / 2, RACK_LENGTH / 2 + 0.04);
+//         backPanel.castShadow = true;
+//         backPanel.receiveShadow = true;
+//         backPanel.name = "FinalRackBackPanel";
+//         wrapper.add(backPanel);
+// 
+//         // Add stiffening ribs to back panel for realism
+//         const ribMaterial = new THREE.MeshStandardMaterial({
+//           color: 0x3a4558,
+//           metalness: 0.7,
+//           roughness: 0.3,
+//         });
+//         for (let i = 0; i < 5; i++) {
+//           const rib = new THREE.Mesh(
+//             new THREE.BoxGeometry(RACK_WIDTH, 0.06, 0.06),
+//             ribMaterial
+//           );
+//           rib.position.set(0, (i + 1) * (RACK_HEIGHT / 6), RACK_LENGTH / 2 + 0.08);
+//           rib.castShadow = true;
+//           rib.receiveShadow = true;
+//           wrapper.add(rib);
+//         }
+// 
+//         wrapper.userData.glbRoot = model;
+//         wrapper.userData.isFinalRack = true;
+//         wrapper.userData.hasBackPanel = true;
+//         wrapper.add(model);
+//       },
+//       undefined,
+//       (error: unknown) => console.error("[FINAL-RACK] GLB load error:", error)
+//     );
 
     return wrapper;
   }
@@ -9550,6 +10182,36 @@ class Sim {
       this.modObjs.foup = foup;
       this.scene.add(foup);
       console.log('[SIM] FOUP build complete');
+
+      // Second wafer module, parked beside the Input Wafer. Built after the
+      // FOUP so it can measure the FOUP's real world bounds; it reads them but
+      // never modifies the FOUP itself.
+      const secondWafer = this._buildSecondWaferModule(foup);
+      this.modObjs.second_wafer_module = secondWafer;
+      this.scene.add(secondWafer);
+      console.log('[SIM] Second wafer module build complete');
+
+      // Flux fixture, one robot corridor (RACK_CLEARANCE) downstream on X.
+      // Flip-chip robot, standing in the corridor between rack and fixture.
+      const flipChipRobot = this._buildFlipChipRobot();
+      this.modObjs.flip_chip_robot = flipChipRobot;
+      this.scene.add(flipChipRobot);
+      console.log('[SIM] Flip chip robot build complete');
+
+      const fluxFixture = this._buildFluxFixture();
+      this.modObjs.flux_fixture = fluxFixture;
+      this.scene.add(fluxFixture);
+      console.log('[SIM] Flux fixture build complete');
+
+      // Substrate align stage - the station after the flux fixture.
+      const substageAlign = this._buildSubstageAlign();
+      this.modObjs.substage_align = substageAlign;
+      this.scene.add(substageAlign);
+      console.log('[SIM] Substrate align stage build complete');
+
+      // Reports measured clearance / collinearity / overlaps once every model
+      // has landed. Report-only: it never repositions anything.
+      this._validateLayout();
       const flipChipBonder = this._buildFlipChipBonder();
       this.modObjs.flip_chip_bonder = flipChipBonder;
       this.scene.add(flipChipBonder);
@@ -9569,20 +10231,21 @@ class Sim {
       robotStart.y = 0;
       robotStart.z += ROBOT_OFFSET_Z;
     }
-    buildRobotGLB(
-      this.scene,
-      robotStart,
-      0x00d8ff,
-      3.5,
-      (robot) => {
-        this.robotEFEM = robot;
-        robot.group.userData.railX = robotStart.x;
-        robot.group.userData.armPhase = 'idle';
-        robot.group.userData.phaseT = 0;
-        robot.group.userData.gripperState = 0;
-        console.log('[SIM] roboticarm.glb connected to EFEM wafer process');
-      }
-    );
+    // ===== GLB-REMOVED (buildRobotGLB() call site - EFEM robot wiring) - re-wire the new module here. See GLB_WIRING_CONTRACT.md =====
+//     buildRobotGLB(
+//       this.scene,
+//       robotStart,
+//       0x00d8ff,
+//       3.5,
+//       (robot) => {
+//         this.robotEFEM = robot;
+//         robot.group.userData.railX = robotStart.x;
+//         robot.group.userData.armPhase = 'idle';
+//         robot.group.userData.phaseT = 0;
+//         robot.group.userData.gripperState = 0;
+//         console.log('[SIM] roboticarm.glb connected to EFEM wafer process');
+//       }
+//     );
     console.log('[SIM] Robot GLB build complete');
 
     // Only the EFEM wafer-loading robot remains in the scene. The final rack is
@@ -12411,6 +13074,17 @@ case 'coat_lower': {
     this._updateCamera();
     if (this.bondTransfer) this.bondTransfer.update(simDt);
     this.bonderController?.update(rawDt * this.speed);
+
+    // Drive any station GLB clip from the SHARED loop - one place, no second
+    // animation system. Any modObjs entry that parked a mixer in userData
+    // (second wafer module, flux fixture, ...) is ticked here.
+    for (const obj of Object.values(this.modObjs)) {
+      const mixer = obj?.userData?.mixer as THREE.AnimationMixer | undefined;
+      if (mixer) mixer.update(simDt);
+    }
+    // Flip-chip robot: its controller owns its own mixer and phase tracking.
+    this.flipChipRobot?.update(simDt);
+
     this.renderer.render(this.scene, this.camera);
     this.onUI(this._buildUI());
   };
@@ -13108,6 +13782,9 @@ case 'coat_lower': {
   destroy() {
     cancelAnimationFrame(this._animId);
     this.bonderController?.dispose();
+    // Releases the robot's geometry, materials and mixer (spec section 6).
+    this.flipChipRobot?.dispose();
+    this.flipChipRobot = undefined;
     this.renderer.domElement.removeEventListener("mousedown", this._md);
     window.removeEventListener("mouseup", this._mu);
     window.removeEventListener("mousemove", this._mm);

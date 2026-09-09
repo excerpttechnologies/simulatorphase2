@@ -30,7 +30,7 @@ export default function Foup3D({ active, animating }: Props) {
     // Dynamically import GLTFLoader at runtime so bundlers don't include three/examples on the server
     ;(async () => {
       try {
-        const { GLTFLoader } = await import('three/examples/jsm/loaders/GLTFLoader')
+        const { GLTFLoader } = await import('three/examples/jsm/loaders/GLTFLoader.js')
         const loader = new GLTFLoader()
         loader.load(
           '/wafer_rack_module.glb',

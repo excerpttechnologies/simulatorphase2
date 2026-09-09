@@ -62,9 +62,10 @@ function Scene3D({ currentStep, isPlaying, onStepChange, onStateUpdate }: FlipCh
       registryRef.current = loader.getRegistry();
 
       try {
-        const mainMachine = await loader.loadMainMachine();
-        scene.add(mainMachine);
-        console.log('[SCENE] Main machine loaded and added to scene');
+        // ===== GLB-REMOVED (loadMainMachine - /flip_chip_bonder.glb) - re-wire the new module here. See GLB_WIRING_CONTRACT.md =====
+        // const mainMachine = await loader.loadMainMachine();
+        // scene.add(mainMachine);
+        // console.log('[SCENE] Main machine loaded and added to scene');
 
         // Create die mesh
         const die = loader.createDieMesh();
@@ -244,7 +245,7 @@ export function FlipChipBonder3D({
           enableZoom={true}
           enableRotate={true}
         />
-      </Canvas
+      </Canvas>
     </div>
   );
 }

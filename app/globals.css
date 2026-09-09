@@ -1,4 +1,20 @@
-@import 'tailwindcss';
+/* `source(none)` disables Tailwind v4's automatic source detection, which
+   otherwise walks the whole project — including public/. The .glb models there
+   are binary but mostly TEXT: waferrxk.glb alone carries a 2.96 MB JSON chunk
+   describing 15,025 nodes. Scanning that (plus the .rar files and
+   tsconfig.tsbuildinfo) exploded the candidate set and made the Tailwind engine
+   attempt a 16 GB allocation, which killed the CSS build under BOTH Turbopack
+   ("Failed to write app endpoint /page ... os error 10054") and webpack
+   ("memory allocation of 8053063680 bytes failed").
+   Scanning is now scoped to the directories that actually contain classes.
+   Add a new @source line if you introduce another source directory. */
+@import 'tailwindcss' source(none);
+@source "../app/**/*.{ts,tsx,js,jsx,mdx}";
+@source "../components/**/*.{ts,tsx,js,jsx,mdx}";
+@source "../lib/**/*.{ts,tsx,js,jsx,mdx}";
+@source "../hooks/**/*.{ts,tsx,js,jsx,mdx}";
+@source "../contexts/**/*.{ts,tsx,js,jsx,mdx}";
+
 @import 'tw-animate-css';
 
 @custom-variant dark (&:is(.dark *));

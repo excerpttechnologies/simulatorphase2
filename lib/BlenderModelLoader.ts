@@ -73,65 +73,67 @@ export class BlenderModelLoader {
     this.loader = new GLTFLoader();
     this.registry = new ModelRegistry();
   }
-
-  /**
-   * Load main flip-chip-bonder model
-   */
-  async loadMainMachine(path: string = '/flip_chip_bonder.glb'): Promise<THREE.Group> {
-    return new Promise((resolve, reject) => {
-      this.loader.load(
-        path,
-        (gltf) => {
-          console.log('[MODEL] Flip-chip-bonder loaded');
-
-          const scene = gltf.scene;
-          this.inspectModelHierarchy(scene);
-          this.mapModelNodes(scene);
-          this.registry.machineRoot = scene;
-
+  // ===== GLB-REMOVED (BlenderModelLoader.loadMainMachine - /flip_chip_bonder.glb) - re-wire the new module here. See GLB_WIRING_CONTRACT.md =====
+  // 
+  // /**
+  // * Load main flip-chip-bonder model
+  // */
+  // async loadMainMachine(path: string = '/flip_chip_bonder.glb'): Promise<THREE.Group> {
+  // return new Promise((resolve, reject) => {
+  // this.loader.load(
+  // path,
+  // (gltf) => {
+  // console.log('[MODEL] Flip-chip-bonder loaded');
+  // 
+  // const scene = gltf.scene;
+  // this.inspectModelHierarchy(scene);
+  // this.mapModelNodes(scene);
+  // this.registry.machineRoot = scene;
+  // 
           // Calibrate model scale
-          this.calibrateModelScale(scene);
-
-          resolve(scene);
-        },
-        (progress) => {
-          console.log(
-            `[LOADING] Flip-chip-bonder: ${(
-              (progress.loaded / progress.total) *
-              100
-            ).toFixed(2)}%`
-          );
-        },
-        (error) => {
-          console.error('[ERROR] Failed to load flip-chip-bonder:', error);
-          reject(error);
-        }
-      );
-    });
-  }
-
-  /**
-   * Load robotic arm model (if separate)
-   */
-  async loadRoboticArm(path: string = '/roboticarm.glb'): Promise<THREE.Group> {
-    return new Promise((resolve, reject) => {
-      this.loader.load(
-        path,
-        (gltf) => {
-          console.log('[MODEL] Robotic arm loaded');
-          const scene = gltf.scene;
-          this.inspectModelHierarchy(scene);
-          this.registry.pickRobot = scene;
-          resolve(scene);
-        },
-        undefined,
-        (error) => {
-          console.error('[ERROR] Failed to load robotic arm:', error);
-          reject(error);
-        }
-      );
-    });
-  }
+  // this.calibrateModelScale(scene);
+  // 
+  // resolve(scene);
+  // },
+  // (progress) => {
+  // console.log(
+  // `[LOADING] Flip-chip-bonder: ${(
+  // (progress.loaded / progress.total) *
+  // 100
+  // ).toFixed(2)}%`
+  // );
+  // },
+  // (error) => {
+  // console.error('[ERROR] Failed to load flip-chip-bonder:', error);
+  // reject(error);
+  // }
+  // );
+  // });
+  // }
+  // ===== GLB-REMOVED (BlenderModelLoader.loadRoboticArm - /roboticarm.glb) - re-wire the new module here. See GLB_WIRING_CONTRACT.md =====
+  // 
+  // /**
+  // * Load robotic arm model (if separate)
+  // */
+  // async loadRoboticArm(path: string = '/roboticarm.glb'): Promise<THREE.Group> {
+  // return new Promise((resolve, reject) => {
+  // this.loader.load(
+  // path,
+  // (gltf) => {
+  // console.log('[MODEL] Robotic arm loaded');
+  // const scene = gltf.scene;
+  // this.inspectModelHierarchy(scene);
+  // this.registry.pickRobot = scene;
+  // resolve(scene);
+  // },
+  // undefined,
+  // (error) => {
+  // console.error('[ERROR] Failed to load robotic arm:', error);
+  // reject(error);
+  // }
+  // );
+  // });
+  // }
 
   /**
    * Load wafer rack module
