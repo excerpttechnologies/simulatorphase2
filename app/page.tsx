@@ -243,9 +243,18 @@ const WAFER_MODULE_X = -18;
 const WAFER_MODULE_Z = PRODUCTION_AXIS_Z;
 // Derived, never hand-typed, so it cannot drift out of sync with the width.
 const WAFER_MODULE_HALF_X = SECOND_MODULE_TARGET_WIDTH / 2;
+// ►► INPUT WAFER RACK SIZE KNOB ◄◄
 // Uniform scale applied to the whole rack group (model AND its anchors, so the
 // slot/pickup targets keep matching the geometry). Raise to enlarge the rack.
-const RACK_SCALE = 1.7;
+// Measured against the real asset:
+//   x1.7 ->  4.76 x  5.10 x  5.44   (previous - smallest station in the scene)
+//   x2.5 ->  7.00 x  7.50 x  8.00
+//   x3.5 ->  9.80 x 10.50 x 11.20   (current)
+//   x5.0 -> 14.00 x 15.00 x 16.00
+// No upper bound to worry about: RACK_RELOCATED_X and the Y compensation are
+// both derived from this, so the 10-unit gap to the wafer module and the base
+// sitting on the work surface hold at every scale.
+const RACK_SCALE = 3.5;
 // ROBOT WORKING CORRIDOR: the minimum straight-line clearance between the wafer
 // rack area and the flux fixture working area, in three.js WORLD UNITS (not
 // pixels, not zoom). The robot picks at the rack, travels this corridor along
